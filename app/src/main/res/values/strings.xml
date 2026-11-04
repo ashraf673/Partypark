@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Partypark</string>
+    <!-- Replace with your Web client ID from Firebase -->
+    <string name="default_web_client_id">YOUR_WEB_CLIENT_ID_HERE</string>
 </resources>
