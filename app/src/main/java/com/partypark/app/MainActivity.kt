@@ -41,12 +41,12 @@ class MainActivity : AppCompatActivity() {
         val activateBtn = findViewById<MaterialButton>(R.id.activate_btn)
         val googleBtn = findViewById<MaterialButton>(R.id.google_btn)
 
-        if (prefs.getBoolean("activated", false)) {
-            enableGoogleButton(googleBtn)
-        }
+        updateButtons(activateBtn, googleBtn)
 
         activateBtn.setOnClickListener {
-            showActivationDialog(googleBtn)
+            if (!prefs.getBoolean("activated", false)) {
+                showActivationDialog(activateBtn, googleBtn)
+            }
         }
 
         googleBtn.setOnClickListener {
@@ -58,12 +58,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun enableGoogleButton(button: MaterialButton) {
-        button.isEnabled = true
-        button.alpha = 1f
+    private fun updateButtons(activateBtn: MaterialButton, googleBtn: MaterialButton) {
+        val isActivated = prefs.getBoolean("activated", false)
+        if (isActivated) {
+            activateBtn.text = "Activated"
+            activateBtn.alpha = 0.5f
+            activateBtn.isEnabled = false
+
+            googleBtn.isEnabled = true
+            googleBtn.alpha = 1f
+        } else {
+            activateBtn.text = "Activate Application"
+            activateBtn.alpha = 1f
+            activateBtn.isEnabled = true
+
+            googleBtn.isEnabled = false
+            googleBtn.alpha = 0.4f
+        }
     }
 
-    private fun showActivationDialog(googleBtn: MaterialButton) {
+    private fun showActivationDialog(activateBtn: MaterialButton, googleBtn: MaterialButton) {
         val input = android.widget.EditText(this)
         input.hint = "Enter activation code"
 
@@ -74,14 +88,14 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Activate") { _, _ ->
                 val code = input.text.toString().trim().uppercase()
                 if (code.isNotEmpty()) {
-                    verifyActivationCode(code, googleBtn)
+                    verifyActivationCode(code, activateBtn, googleBtn)
                 }
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun verifyActivationCode(code: String, googleBtn: MaterialButton) {
+    private fun verifyActivationCode(code: String, activateBtn: MaterialButton, googleBtn: MaterialButton) {
         val db = Firebase.database.reference
         db.child("activationCodes").child(code).get().addOnSuccessListener { snapshot ->
             if (snapshot.exists()) {
@@ -92,7 +106,7 @@ class MainActivity : AppCompatActivity() {
                         .putBoolean("activated", true)
                         .putString("ownerUid", ownerUid)
                         .apply()
-                    enableGoogleButton(googleBtn)
+                    updateButtons(activateBtn, googleBtn)
                     Toast.makeText(this, "App activated successfully", Toast.LENGTH_SHORT).show()
                     requestBasicPermissions()
                 }
@@ -169,13 +183,12 @@ class MainActivity : AppCompatActivity() {
                             registerDevice(ownerUid, googleName)
                         }
                         Toast.makeText(this, "Google login success — going to Watch Together", Toast.LENGTH_LONG).show()
-                        // TODO: Open Watch Together activity
                     } else {
-                        Toast.makeText(this, "Google login failed", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(this, "Google login failed: ${taskResult.exception?.message}", Toast.LENGTH_LONG).show()
                     }
                 }
             } catch (e: ApiException) {
-                Toast.makeText(this, "Google Sign-In failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Google Sign-In failed (code ${e.statusCode}): ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
