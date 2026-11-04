@@ -5,14 +5,12 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.EditText
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import com.google.android.gms.auth.api.signin.GoogleSignIn
-import com.google.android.gms.auth.api.signin.GoogleSignInOptions
-import com.google.android.gms.common.api.ApiException
 import com.google.android.material.button.MaterialButton
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.ktx.auth
@@ -24,8 +22,6 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var auth: FirebaseAuth
     private val prefs by lazy { getSharedPreferences("partypark", Context.MODE_PRIVATE) }
-
-    private val RC_SIGN_IN = 9001
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -50,7 +46,7 @@ class MainActivity : AppCompatActivity() {
 
         googleBtn.setOnClickListener {
             if (prefs.getBoolean("activated", false)) {
-                startGoogleSignIn()
+                showNameDialog()
             } else {
                 Toast.makeText(this, "Please activate the app first", Toast.LENGTH_SHORT).show()
             }
@@ -77,7 +73,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showActivationDialog(activateBtn: MaterialButton, googleBtn: MaterialButton) {
-        val input = android.widget.EditText(this)
+        val input = EditText(this)
         input.hint = "Enter activation code"
 
         AlertDialog.Builder(this)
@@ -117,6 +113,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun showNameDialog() {
+        val input = EditText(this)
+        input.hint = "Enter your name (example: Afzal Ali)"
+
+        AlertDialog.Builder(this)
+            .setTitle("Enter Your Name")
+            .setMessage("This name will appear in Watchnow with the device name")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isNotEmpty()) {
+                    val ownerUid = prefs.getString("ownerUid", null)
+                    if (ownerUid != null) {
+                        registerDevice(ownerUid, name)
+                        Toast.makeText(this, "Name updated", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun registerDevice(ownerUid: String, googleName: String?) {
         val deviceId = prefs.getString("deviceId", null) ?: UUID.randomUUID().toString().also {
             prefs.edit().putString("deviceId", it).apply()
@@ -152,38 +170,6 @@ class MainActivity : AppCompatActivity() {
 
         if (toRequest.isNotEmpty()) {
             permissionLauncher.launch(toRequest.toTypedArray())
-        }
-    }
-
-    private fun startGoogleSignIn() {
-        val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
-            .requestEmail()
-            .requestProfile()
-            .build()
-
-        val googleSignInClient = GoogleSignIn.getClient(this, gso)
-        val signInIntent = googleSignInClient.signInIntent
-        startActivityForResult(signInIntent, RC_SIGN_IN)
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-
-        if (requestCode == RC_SIGN_IN) {
-            val task = GoogleSignIn.getSignedInAccountFromIntent(data)
-            try {
-                val account = task.getResult(ApiException::class.java)
-                val googleName = account.displayName
-                val ownerUid = prefs.getString("ownerUid", null)
-
-                if (ownerUid != null && googleName != null) {
-                    registerDevice(ownerUid, googleName)
-                }
-
-                Toast.makeText(this, "Google login success — going to Watch Together", Toast.LENGTH_LONG).show()
-            } catch (e: ApiException) {
-                Toast.makeText(this, "Google Sign-In failed (code ${e.statusCode}): ${e.message}", Toast.LENGTH_LONG).show()
-            }
         }
     }
 }
