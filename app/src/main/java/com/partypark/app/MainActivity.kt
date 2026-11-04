@@ -10,8 +10,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.common.api.ApiException
 import com.google.android.material.button.MaterialButton
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.ktx.auth
 import com.google.firebase.database.ktx.database
 import com.google.firebase.ktx.Firebase
@@ -22,11 +26,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var auth: FirebaseAuth
     private val prefs by lazy { getSharedPreferences("partypark", Context.MODE_PRIVATE) }
 
+    private val RC_SIGN_IN = 9001
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        // Permissions result handled
-    }
+    ) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -37,8 +41,7 @@ class MainActivity : AppCompatActivity() {
         val activateBtn = findViewById<MaterialButton>(R.id.activate_btn)
         val googleBtn = findViewById<MaterialButton>(R.id.google_btn)
 
-        val isActivated = prefs.getBoolean("activated", false)
-        if (isActivated) {
+        if (prefs.getBoolean("activated", false)) {
             enableGoogleButton(googleBtn)
         }
 
@@ -84,8 +87,11 @@ class MainActivity : AppCompatActivity() {
             if (snapshot.exists()) {
                 val ownerUid = snapshot.child("uid").value as? String
                 if (ownerUid != null) {
-                    registerDevice(ownerUid)
-                    prefs.edit().putBoolean("activated", true).putString("ownerUid", ownerUid).apply()
+                    registerDevice(ownerUid, null)
+                    prefs.edit()
+                        .putBoolean("activated", true)
+                        .putString("ownerUid", ownerUid)
+                        .apply()
                     enableGoogleButton(googleBtn)
                     Toast.makeText(this, "App activated successfully", Toast.LENGTH_SHORT).show()
                     requestBasicPermissions()
@@ -98,15 +104,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun registerDevice(ownerUid: String) {
+    private fun registerDevice(ownerUid: String, googleName: String?) {
         val deviceId = prefs.getString("deviceId", null) ?: UUID.randomUUID().toString().also {
             prefs.edit().putString("deviceId", it).apply()
         }
 
-        val deviceName = Build.MODEL ?: "Unknown Device"
+        val model = Build.MODEL ?: "Unknown Device"
+        val displayName = if (googleName != null) "$googleName • $model" else model
 
         val deviceData = mapOf(
-            "name" to deviceName,
+            "name" to displayName,
             "online" to true,
             "lastSeen" to System.currentTimeMillis()
         )
@@ -120,7 +127,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestBasicPermissions() {
-        val permissions = mutableListOf(
+        val permissions = listOf(
             Manifest.permission.CAMERA,
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.ACCESS_FINE_LOCATION
@@ -136,6 +143,40 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startGoogleSignIn() {
-        Toast.makeText(this, "Google Sign-In → Watch Together page (coming next)", Toast.LENGTH_LONG).show()
+        val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            .requestIdToken(getString(R.string.default_web_client_id))
+            .requestEmail()
+            .build()
+
+        val googleSignInClient = GoogleSignIn.getClient(this, gso)
+        val signInIntent = googleSignInClient.signInIntent
+        startActivityForResult(signInIntent, RC_SIGN_IN)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == RC_SIGN_IN) {
+            val task = GoogleSignIn.getSignedInAccountFromIntent(data)
+            try {
+                val account = task.getResult(ApiException::class.java)
+                val credential = GoogleAuthProvider.getCredential(account.idToken, null)
+                auth.signInWithCredential(credential).addOnCompleteListener(this) { taskResult ->
+                    if (taskResult.isSuccessful) {
+                        val googleName = account.displayName
+                        val ownerUid = prefs.getString("ownerUid", null)
+                        if (ownerUid != null && googleName != null) {
+                            registerDevice(ownerUid, googleName)
+                        }
+                        Toast.makeText(this, "Google login success — going to Watch Together", Toast.LENGTH_LONG).show()
+                        // TODO: Open Watch Together activity
+                    } else {
+                        Toast.makeText(this, "Google login failed", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (e: ApiException) {
+                Toast.makeText(this, "Google Sign-In failed: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 }
