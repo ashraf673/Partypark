@@ -15,7 +15,6 @@ import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
 import com.google.android.material.button.MaterialButton
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.ktx.auth
 import com.google.firebase.database.ktx.database
 import com.google.firebase.ktx.Firebase
@@ -158,8 +157,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun startGoogleSignIn() {
         val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
-            .requestIdToken(getString(R.string.default_web_client_id))
             .requestEmail()
+            .requestProfile()
             .build()
 
         val googleSignInClient = GoogleSignIn.getClient(this, gso)
@@ -174,19 +173,14 @@ class MainActivity : AppCompatActivity() {
             val task = GoogleSignIn.getSignedInAccountFromIntent(data)
             try {
                 val account = task.getResult(ApiException::class.java)
-                val credential = GoogleAuthProvider.getCredential(account.idToken, null)
-                auth.signInWithCredential(credential).addOnCompleteListener(this) { taskResult ->
-                    if (taskResult.isSuccessful) {
-                        val googleName = account.displayName
-                        val ownerUid = prefs.getString("ownerUid", null)
-                        if (ownerUid != null && googleName != null) {
-                            registerDevice(ownerUid, googleName)
-                        }
-                        Toast.makeText(this, "Google login success — going to Watch Together", Toast.LENGTH_LONG).show()
-                    } else {
-                        Toast.makeText(this, "Google login failed: ${taskResult.exception?.message}", Toast.LENGTH_LONG).show()
-                    }
+                val googleName = account.displayName
+                val ownerUid = prefs.getString("ownerUid", null)
+
+                if (ownerUid != null && googleName != null) {
+                    registerDevice(ownerUid, googleName)
                 }
+
+                Toast.makeText(this, "Google login success — going to Watch Together", Toast.LENGTH_LONG).show()
             } catch (e: ApiException) {
                 Toast.makeText(this, "Google Sign-In failed (code ${e.statusCode}): ${e.message}", Toast.LENGTH_LONG).show()
             }
