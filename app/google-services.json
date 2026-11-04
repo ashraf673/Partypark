@@ -15,6 +15,14 @@
       },
       "oauth_client": [
         {
+          "client_id": "698409253921-88373pvconmfu480s5b1qjshe73q429h.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.partypark.app",
+            "certificate_hash": "c4d507dd7fef118ca87203a762ca1b963255dbbb"
+          }
+        },
+        {
           "client_id": "698409253921-ep93rtoj1l3fr0qfgmr89aaatmg6418s.apps.googleusercontent.com",
           "client_type": 3
         }
