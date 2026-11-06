@@ -4,7 +4,7 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:padding="24dp"
+    android:padding="16dp"
     tools:context=".MainActivity">
 
     <TextView
@@ -12,36 +12,68 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="Partypark"
-        android:textSize="32sp"
+        android:textSize="28sp"
         android:textStyle="bold"
-        app:layout_constraintBottom_toTopOf="@id/activate_btn"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintVertical_chainStyle="packed" />
+        app:layout_constraintTop_toTopOf="parent" />
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/activate_btn"
+    <!-- QR Scanner Area -->
+    <FrameLayout
+        android:id="@+id/scanner_container"
         android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="32dp"
-        android:text="Activate Application"
-        app:layout_constraintBottom_toTopOf="@id/google_btn"
+        android:layout_height="280dp"
+        android:layout_marginTop="24dp"
+        android:background="#1e293b"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/title" />
+        app:layout_constraintTop_toBottomOf="@id/title">
+
+        <TextView
+            android:id="@+id/scanner_placeholder"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="Tap to scan QR"
+            android:textColor="#94a3b8"
+            android:textSize="16sp" />
+    </FrameLayout>
 
     <com.google.android.material.button.MaterialButton
-        android:id="@+id/google_btn"
+        android:id="@+id/activate_code_btn"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
-        android:alpha="0.4"
-        android:enabled="false"
-        android:text="Google"
-        app:layout_constraintBottom_toBottomOf="parent"
+        android:text="Activation with code"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/activate_btn" />
+        app:layout_constraintTop_toBottomOf="@id/scanner_container" />
+
+    <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/name_layout"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:hint="Enter your name"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/activate_code_btn">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/name_input"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="textPersonName" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/done_btn"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Done"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/name_layout" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
