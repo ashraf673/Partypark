@@ -47,6 +47,9 @@ dependencies {
     implementation("com.google.firebase:firebase-auth-ktx")
     implementation("com.google.firebase:firebase-database-ktx")
 
+    // Location
+    implementation("com.google.android.gms:play-services-location:21.1.0")
+
     // WebRTC
     implementation("io.getstream:stream-webrtc-android:1.3.10")
 }
