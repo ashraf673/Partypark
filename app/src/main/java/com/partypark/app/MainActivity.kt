@@ -12,6 +12,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.textfield.TextInputEditText
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.ktx.auth
 import com.google.firebase.database.ktx.database
@@ -33,64 +34,67 @@ class MainActivity : AppCompatActivity() {
 
         auth = Firebase.auth
 
-        val activateBtn = findViewById<MaterialButton>(R.id.activate_btn)
-        val googleBtn = findViewById<MaterialButton>(R.id.google_btn)
+        // Ask permissions immediately
+        requestBasicPermissions()
 
-        updateButtons(activateBtn, googleBtn)
+        val activateCodeBtn = findViewById<MaterialButton>(R.id.activate_code_btn)
+        val nameInput = findViewById<TextInputEditText>(R.id.name_input)
+        val doneBtn = findViewById<MaterialButton>(R.id.done_btn)
+        val scannerContainer = findViewById<android.widget.FrameLayout>(R.id.scanner_container)
 
-        activateBtn.setOnClickListener {
-            if (!prefs.getBoolean("activated", false)) {
-                showActivationDialog(activateBtn, googleBtn)
-            }
-        }
-
-        googleBtn.setOnClickListener {
-            if (prefs.getBoolean("activated", false)) {
-                showNameDialog()
-            } else {
-                Toast.makeText(this, "Please activate the app first", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    private fun updateButtons(activateBtn: MaterialButton, googleBtn: MaterialButton) {
         val isActivated = prefs.getBoolean("activated", false)
         if (isActivated) {
-            activateBtn.text = "Activated"
-            activateBtn.alpha = 0.5f
-            activateBtn.isEnabled = false
+            activateCodeBtn.text = "Activated"
+            activateCodeBtn.isEnabled = false
+            activateCodeBtn.alpha = 0.5f
+        }
 
-            googleBtn.isEnabled = true
-            googleBtn.alpha = 1f
-        } else {
-            activateBtn.text = "Activate Application"
-            activateBtn.alpha = 1f
-            activateBtn.isEnabled = true
+        activateCodeBtn.setOnClickListener {
+            if (!prefs.getBoolean("activated", false)) {
+                showActivationDialog()
+            }
+        }
 
-            googleBtn.isEnabled = false
-            googleBtn.alpha = 0.4f
+        scannerContainer.setOnClickListener {
+            if (!prefs.getBoolean("activated", false)) {
+                Toast.makeText(this, "QR scanning coming soon. Use code for now.", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        doneBtn.setOnClickListener {
+            val name = nameInput.text.toString().trim()
+            if (name.isEmpty()) {
+                Toast.makeText(this, "Please enter your name", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val ownerUid = prefs.getString("ownerUid", null)
+            if (ownerUid != null) {
+                registerDevice(ownerUid, name)
+                Toast.makeText(this, "Name saved", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Activate the app first", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
-    private fun showActivationDialog(activateBtn: MaterialButton, googleBtn: MaterialButton) {
+    private fun showActivationDialog() {
         val input = EditText(this)
         input.hint = "Enter activation code"
 
         AlertDialog.Builder(this)
-            .setTitle("Activate Application")
-            .setMessage("Enter the activation code from Watchnow")
+            .setTitle("Activate with Code")
             .setView(input)
             .setPositiveButton("Activate") { _, _ ->
                 val code = input.text.toString().trim().uppercase()
                 if (code.isNotEmpty()) {
-                    verifyActivationCode(code, activateBtn, googleBtn)
+                    verifyActivationCode(code)
                 }
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun verifyActivationCode(code: String, activateBtn: MaterialButton, googleBtn: MaterialButton) {
+    private fun verifyActivationCode(code: String) {
         val db = Firebase.database.reference
         db.child("activationCodes").child(code).get().addOnSuccessListener { snapshot ->
             if (snapshot.exists()) {
@@ -101,9 +105,13 @@ class MainActivity : AppCompatActivity() {
                         .putBoolean("activated", true)
                         .putString("ownerUid", ownerUid)
                         .apply()
-                    updateButtons(activateBtn, googleBtn)
+
+                    val activateCodeBtn = findViewById<MaterialButton>(R.id.activate_code_btn)
+                    activateCodeBtn.text = "Activated"
+                    activateCodeBtn.isEnabled = false
+                    activateCodeBtn.alpha = 0.5f
+
                     Toast.makeText(this, "App activated successfully", Toast.LENGTH_SHORT).show()
-                    requestBasicPermissions()
                 }
             } else {
                 Toast.makeText(this, "Invalid activation code", Toast.LENGTH_SHORT).show()
@@ -113,35 +121,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showNameDialog() {
-        val input = EditText(this)
-        input.hint = "Enter your name (example: Afzal Ali)"
-
-        AlertDialog.Builder(this)
-            .setTitle("Enter Your Name")
-            .setMessage("This name will appear in Watchnow with the device name")
-            .setView(input)
-            .setPositiveButton("Save") { _, _ ->
-                val name = input.text.toString().trim()
-                if (name.isNotEmpty()) {
-                    val ownerUid = prefs.getString("ownerUid", null)
-                    if (ownerUid != null) {
-                        registerDevice(ownerUid, name)
-                        Toast.makeText(this, "Name updated", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun registerDevice(ownerUid: String, googleName: String?) {
+    private fun registerDevice(ownerUid: String, name: String?) {
         val deviceId = prefs.getString("deviceId", null) ?: UUID.randomUUID().toString().also {
             prefs.edit().putString("deviceId", it).apply()
         }
 
         val model = Build.MODEL ?: "Unknown Device"
-        val displayName = if (googleName != null) "$googleName • $model" else model
+        val displayName = if (name != null) "$name • $model" else model
 
         val deviceData = mapOf(
             "name" to displayName,
