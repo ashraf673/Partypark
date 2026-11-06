@@ -34,7 +34,6 @@ class MainActivity : AppCompatActivity() {
 
         auth = Firebase.auth
 
-        // Ask permissions immediately
         requestBasicPermissions()
 
         val activateCodeBtn = findViewById<MaterialButton>(R.id.activate_code_btn)
@@ -71,10 +70,23 @@ class MainActivity : AppCompatActivity() {
             if (ownerUid != null) {
                 registerDevice(ownerUid, name)
                 Toast.makeText(this, "Name saved", Toast.LENGTH_SHORT).show()
+                // Start WebRTC signaling after name is set
+                startWebRTCSignaling()
             } else {
                 Toast.makeText(this, "Activate the app first", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    private fun startWebRTCSignaling() {
+        val deviceId = prefs.getString("deviceId", null) ?: return
+        val signalingRef = Firebase.database.reference.child("signaling").child(deviceId)
+
+        // Placeholder: In the next step we will create the real offer and send it
+        Toast.makeText(this, "WebRTC signaling ready for device: $deviceId", Toast.LENGTH_LONG).show()
+
+        // Clean old signaling data
+        signalingRef.removeValue()
     }
 
     private fun showActivationDialog() {
