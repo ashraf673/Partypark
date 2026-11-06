@@ -47,6 +47,6 @@ dependencies {
     implementation("com.google.firebase:firebase-auth-ktx")
     implementation("com.google.firebase:firebase-database-ktx")
 
-    // Google Sign-In
-    implementation("com.google.android.gms:play-services-auth:20.7.0")
+    // WebRTC
+    implementation("io.getstream:stream-webrtc-android:1.1.3")
 }
