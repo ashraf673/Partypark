@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
@@ -45,6 +46,8 @@ class MainActivity : AppCompatActivity() {
 
     private val pendingViewerCandidates = mutableListOf<IceCandidate>()
     private var remoteAnswerSet = false
+    private var isFrontCamera = true
+    private var flashlightOn = false
 
     private val fusedLocationClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
     private var locationCallback: LocationCallback? = null
@@ -97,9 +100,64 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Name saved — starting stream", Toast.LENGTH_SHORT).show()
                 startCameraStream()
                 startLocationUpdates()
+                listenForCommands()
             } else {
                 Toast.makeText(this, "Activate the app first", Toast.LENGTH_SHORT).show()
             }
+        }
+    }
+
+    private fun listenForCommands() {
+        val deviceId = prefs.getString("deviceId", null) ?: return
+        Firebase.database.reference
+            .child("commands")
+            .child(deviceId)
+            .addChildEventListener(object : ChildEventListener {
+                override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                    val command = snapshot.getValue(String::class.java) ?: return
+                    handleCommand(command)
+                    snapshot.ref.removeValue()
+                }
+                override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
+                override fun onChildRemoved(snapshot: DataSnapshot) {}
+                override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
+                override fun onCancelled(error: DatabaseError) {}
+            })
+    }
+
+    private fun handleCommand(command: String) {
+        when (command) {
+            "switch_camera" -> switchCamera()
+            "flashlight" -> toggleFlashlight()
+            "mic_off" -> localAudioTrack?.setEnabled(false)
+            "mic_on" -> localAudioTrack?.setEnabled(true)
+            "camera_off" -> localVideoTrack?.setEnabled(false)
+            "camera_on" -> localVideoTrack?.setEnabled(true)
+        }
+    }
+
+    private fun switchCamera() {
+        videoCapturer?.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
+            override fun onCameraSwitchDone(isFront: Boolean) {
+                isFrontCamera = isFront
+                runOnUiThread { Toast.makeText(this@MainActivity, if (isFront) "Front camera" else "Back camera", Toast.LENGTH_SHORT).show() }
+            }
+            override fun onCameraSwitchError(error: String?) {
+                Log.e("Partypark", "Camera switch failed: $error")
+            }
+        })
+    }
+
+    private fun toggleFlashlight() {
+        try {
+            val cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val cameraId = cameraManager.cameraIdList.firstOrNull { id ->
+                cameraManager.getCameraCharacteristics(id).get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+            } ?: return
+            flashlightOn = !flashlightOn
+            cameraManager.setTorchMode(cameraId, flashlightOn)
+        } catch (e: Exception) {
+            Log.e("Partypark", "Flashlight failed", e)
         }
     }
 
