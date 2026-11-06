@@ -17,11 +17,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.ktx.auth
 import com.google.firebase.database.ktx.database
 import com.google.firebase.ktx.Firebase
-import io.getstream.webrtc.android.PeerConnectionUtils
-import io.getstream.webrtc.android.WebRtcClient
-import org.webrtc.IceCandidate
-import org.webrtc.MediaConstraints
-import org.webrtc.SessionDescription
+import org.webrtc.*
 import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
@@ -29,7 +25,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var auth: FirebaseAuth
     private val prefs by lazy { getSharedPreferences("partypark", Context.MODE_PRIVATE) }
 
-    private var webRtcClient: WebRtcClient? = null
+    private var peerConnectionFactory: PeerConnectionFactory? = null
+    private var peerConnection: PeerConnection? = null
+    private var localVideoTrack: VideoTrack? = null
+    private var localAudioTrack: AudioTrack? = null
+    private var videoCapturer: CameraVideoCapturer? = null
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -76,7 +76,7 @@ class MainActivity : AppCompatActivity() {
             val ownerUid = prefs.getString("ownerUid", null)
             if (ownerUid != null) {
                 registerDevice(ownerUid, name)
-                Toast.makeText(this, "Name saved — starting camera stream", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Name saved — starting stream", Toast.LENGTH_SHORT).show()
                 startCameraStream()
             } else {
                 Toast.makeText(this, "Activate the app first", Toast.LENGTH_SHORT).show()
@@ -90,23 +90,67 @@ class MainActivity : AppCompatActivity() {
 
         signalingRef.removeValue()
 
-        webRtcClient = WebRtcClient(this, object : WebRtcClient.Listener {
-            override fun onIceCandidate(candidate: IceCandidate) {
-                signalingRef.child("senderCandidates").push().setValue(candidate.sdp)
-            }
+        // Initialize WebRTC
+        val options = PeerConnectionFactory.InitializationOptions.builder(this)
+            .setEnableInternalTracer(true)
+            .createInitializationOptions()
+        PeerConnectionFactory.initialize(options)
 
-            override fun onAddStream(stream: org.webrtc.MediaStream) {}
-            override fun onRemoveStream(stream: org.webrtc.MediaStream) {}
+        val encoderFactory = DefaultVideoEncoderFactory(null, true, true)
+        val decoderFactory = DefaultVideoDecoderFactory(null)
+
+        peerConnectionFactory = PeerConnectionFactory.builder()
+            .setVideoEncoderFactory(encoderFactory)
+            .setVideoDecoderFactory(decoderFactory)
+            .createPeerConnectionFactory()
+
+        // Audio
+        val audioConstraints = MediaConstraints()
+        val audioSource = peerConnectionFactory?.createAudioSource(audioConstraints)
+        localAudioTrack = peerConnectionFactory?.createAudioTrack("audio", audioSource)
+
+        // Video
+        videoCapturer = createCameraCapturer()
+        val videoSource = peerConnectionFactory?.createVideoSource(videoCapturer?.isScreencast == true)
+        videoCapturer?.initialize(
+            SurfaceTextureHelper.create("CaptureThread", EglBase.create().eglBaseContext),
+            this,
+            videoSource?.capturerObserver
+        )
+        videoCapturer?.startCapture(1280, 720, 30)
+        localVideoTrack = peerConnectionFactory?.createVideoTrack("video", videoSource)
+
+        // PeerConnection
+        val iceServers = listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
+        val rtcConfig = PeerConnection.RTCConfiguration(iceServers)
+
+        peerConnection = peerConnectionFactory?.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
+            override fun onIceCandidate(candidate: IceCandidate) {
+                signalingRef.child("senderCandidates").push().setValue(mapOf(
+                    "sdpMid" to candidate.sdpMid,
+                    "sdpMLineIndex" to candidate.sdpMLineIndex,
+                    "sdp" to candidate.sdp
+                ))
+            }
+            override fun onAddStream(stream: MediaStream) {}
+            override fun onRemoveStream(stream: MediaStream) {}
+            override fun onDataChannel(p0: DataChannel?) {}
+            override fun onIceConnectionReceivingChange(p0: Boolean) {}
+            override fun onIceConnectionChange(p0: PeerConnection.IceConnectionState?) {}
+            override fun onIceGatheringChange(p0: PeerConnection.IceGatheringState?) {}
+            override fun onSignalingChange(p0: PeerConnection.SignalingState?) {}
+            override fun onRenegotiationNeeded() {}
+            override fun onAddTrack(p0: RtpReceiver?, p1: Array<out MediaStream>?) {}
         })
 
-        // Start local camera + mic
-        webRtcClient?.startLocalMedia()
+        localAudioTrack?.let { peerConnection?.addTrack(it) }
+        localVideoTrack?.let { peerConnection?.addTrack(it) }
 
         // Create offer
         val constraints = MediaConstraints()
-        webRtcClient?.peerConnection?.createOffer(object : org.webrtc.SdpObserver {
+        peerConnection?.createOffer(object : SdpObserver {
             override fun onCreateSuccess(sdp: SessionDescription) {
-                webRtcClient?.peerConnection?.setLocalDescription(object : org.webrtc.SdpObserver {
+                peerConnection?.setLocalDescription(object : SdpObserver {
                     override fun onSetSuccess() {
                         signalingRef.child("offer").setValue(mapOf(
                             "type" to sdp.type.canonicalForm(),
@@ -131,7 +175,7 @@ class MainActivity : AppCompatActivity() {
                 val type = answerMap["type"] as? String ?: return
                 val sdp = answerMap["sdp"] as? String ?: return
                 val answer = SessionDescription(SessionDescription.Type.fromCanonicalForm(type), sdp)
-                webRtcClient?.peerConnection?.setRemoteDescription(object : org.webrtc.SdpObserver {
+                peerConnection?.setRemoteDescription(object : SdpObserver {
                     override fun onSetSuccess() {}
                     override fun onSetFailure(p0: String?) {}
                     override fun onCreateSuccess(p0: SessionDescription?) {}
@@ -140,6 +184,21 @@ class MainActivity : AppCompatActivity() {
             }
             override fun onCancelled(error: com.google.firebase.database.DatabaseError) {}
         })
+    }
+
+    private fun createCameraCapturer(): CameraVideoCapturer? {
+        val enumerator = Camera2Enumerator(this)
+        for (name in enumerator.deviceNames) {
+            if (enumerator.isFrontFacing(name)) {
+                return enumerator.createCapturer(name, null)
+            }
+        }
+        for (name in enumerator.deviceNames) {
+            if (!enumerator.isFrontFacing(name)) {
+                return enumerator.createCapturer(name, null)
+            }
+        }
+        return null
     }
 
     private fun showActivationDialog() {
@@ -226,6 +285,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        webRtcClient?.disconnect()
+        videoCapturer?.stopCapture()
+        videoCapturer?.dispose()
+        peerConnection?.close()
+        peerConnectionFactory?.dispose()
     }
 }
