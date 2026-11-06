@@ -48,5 +48,5 @@ dependencies {
     implementation("com.google.firebase:firebase-database-ktx")
 
     // WebRTC
-    implementation("io.getstream:stream-webrtc-android:1.1.3")
+    implementation("io.getstream:stream-webrtc-android:1.3.10")
 }
