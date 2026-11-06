@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.widget.EditText
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -30,6 +31,7 @@ class MainActivity : AppCompatActivity() {
     private var localVideoTrack: VideoTrack? = null
     private var localAudioTrack: AudioTrack? = null
     private var videoCapturer: CameraVideoCapturer? = null
+    private var eglBase: EglBase? = null
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -85,121 +87,140 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startCameraStream() {
-        val deviceId = prefs.getString("deviceId", null) ?: return
-        val signalingRef = Firebase.database.reference.child("signaling").child(deviceId)
+        try {
+            val deviceId = prefs.getString("deviceId", null) ?: return
+            val signalingRef = Firebase.database.reference.child("signaling").child(deviceId)
 
-        signalingRef.removeValue()
+            signalingRef.removeValue()
 
-        // Initialize WebRTC
-        val options = PeerConnectionFactory.InitializationOptions.builder(this)
-            .setEnableInternalTracer(true)
-            .createInitializationOptions()
-        PeerConnectionFactory.initialize(options)
+            // Initialize WebRTC
+            val options = PeerConnectionFactory.InitializationOptions.builder(this)
+                .setEnableInternalTracer(true)
+                .createInitializationOptions()
+            PeerConnectionFactory.initialize(options)
 
-        val encoderFactory = DefaultVideoEncoderFactory(null, true, true)
-        val decoderFactory = DefaultVideoDecoderFactory(null)
+            eglBase = EglBase.create()
 
-        peerConnectionFactory = PeerConnectionFactory.builder()
-            .setVideoEncoderFactory(encoderFactory)
-            .setVideoDecoderFactory(decoderFactory)
-            .createPeerConnectionFactory()
+            val encoderFactory = DefaultVideoEncoderFactory(eglBase?.eglBaseContext, true, true)
+            val decoderFactory = DefaultVideoDecoderFactory(eglBase?.eglBaseContext)
 
-        // Audio
-        val audioConstraints = MediaConstraints()
-        val audioSource = peerConnectionFactory?.createAudioSource(audioConstraints)
-        localAudioTrack = peerConnectionFactory?.createAudioTrack("audio", audioSource)
+            peerConnectionFactory = PeerConnectionFactory.builder()
+                .setVideoEncoderFactory(encoderFactory)
+                .setVideoDecoderFactory(decoderFactory)
+                .createPeerConnectionFactory()
 
-        // Video
-        videoCapturer = createCameraCapturer()
-        val videoSource = peerConnectionFactory?.createVideoSource(videoCapturer?.isScreencast == true)
-        videoCapturer?.initialize(
-            SurfaceTextureHelper.create("CaptureThread", EglBase.create().eglBaseContext),
-            this,
-            videoSource?.capturerObserver
-        )
-        videoCapturer?.startCapture(1280, 720, 30)
-        localVideoTrack = peerConnectionFactory?.createVideoTrack("video", videoSource)
+            // Audio
+            val audioConstraints = MediaConstraints()
+            val audioSource = peerConnectionFactory?.createAudioSource(audioConstraints)
+            localAudioTrack = peerConnectionFactory?.createAudioTrack("audio", audioSource)
 
-        // PeerConnection
-        val iceServers = listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
-        val rtcConfig = PeerConnection.RTCConfiguration(iceServers)
-
-        peerConnection = peerConnectionFactory?.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
-            override fun onIceCandidate(candidate: IceCandidate) {
-                signalingRef.child("senderCandidates").push().setValue(mapOf(
-                    "sdpMid" to candidate.sdpMid,
-                    "sdpMLineIndex" to candidate.sdpMLineIndex,
-                    "sdp" to candidate.sdp
-                ))
+            // Video
+            videoCapturer = createCameraCapturer()
+            if (videoCapturer == null) {
+                Toast.makeText(this, "Camera not available", Toast.LENGTH_SHORT).show()
+                return
             }
-            override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) {}
-            override fun onAddStream(stream: MediaStream) {}
-            override fun onRemoveStream(stream: MediaStream) {}
-            override fun onDataChannel(p0: DataChannel?) {}
-            override fun onIceConnectionReceivingChange(p0: Boolean) {}
-            override fun onIceConnectionChange(p0: PeerConnection.IceConnectionState?) {}
-            override fun onIceGatheringChange(p0: PeerConnection.IceGatheringState?) {}
-            override fun onSignalingChange(p0: PeerConnection.SignalingState?) {}
-            override fun onRenegotiationNeeded() {}
-            override fun onAddTrack(p0: RtpReceiver?, p1: Array<out MediaStream>?) {}
-        })
 
-        localAudioTrack?.let { peerConnection?.addTrack(it) }
-        localVideoTrack?.let { peerConnection?.addTrack(it) }
+            val videoSource = peerConnectionFactory?.createVideoSource(false)
+            val surfaceTextureHelper = SurfaceTextureHelper.create("CaptureThread", eglBase?.eglBaseContext)
+            videoCapturer?.initialize(surfaceTextureHelper, this, videoSource?.capturerObserver)
+            videoCapturer?.startCapture(640, 480, 30)
+            localVideoTrack = peerConnectionFactory?.createVideoTrack("video", videoSource)
 
-        // Create offer
-        val constraints = MediaConstraints()
-        peerConnection?.createOffer(object : SdpObserver {
-            override fun onCreateSuccess(sdp: SessionDescription) {
-                peerConnection?.setLocalDescription(object : SdpObserver {
-                    override fun onSetSuccess() {
-                        signalingRef.child("offer").setValue(mapOf(
-                            "type" to sdp.type.canonicalForm(),
-                            "sdp" to sdp.description
-                        ))
-                        Toast.makeText(this@MainActivity, "Streaming started", Toast.LENGTH_SHORT).show()
-                    }
-                    override fun onSetFailure(p0: String?) {}
-                    override fun onCreateSuccess(p0: SessionDescription?) {}
-                    override fun onCreateFailure(p0: String?) {}
-                }, sdp)
-            }
-            override fun onSetSuccess() {}
-            override fun onCreateFailure(p0: String?) {}
-            override fun onSetFailure(p0: String?) {}
-        }, constraints)
+            // PeerConnection
+            val iceServers = listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
+            val rtcConfig = PeerConnection.RTCConfiguration(iceServers)
 
-        // Listen for answer
-        signalingRef.child("answer").addValueEventListener(object : com.google.firebase.database.ValueEventListener {
-            override fun onDataChange(snapshot: com.google.firebase.database.DataSnapshot) {
-                val answerMap = snapshot.value as? Map<*, *> ?: return
-                val type = answerMap["type"] as? String ?: return
-                val sdp = answerMap["sdp"] as? String ?: return
-                val answer = SessionDescription(SessionDescription.Type.fromCanonicalForm(type), sdp)
-                peerConnection?.setRemoteDescription(object : SdpObserver {
-                    override fun onSetSuccess() {}
-                    override fun onSetFailure(p0: String?) {}
-                    override fun onCreateSuccess(p0: SessionDescription?) {}
-                    override fun onCreateFailure(p0: String?) {}
-                }, answer)
-            }
-            override fun onCancelled(error: com.google.firebase.database.DatabaseError) {}
-        })
+            peerConnection = peerConnectionFactory?.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
+                override fun onIceCandidate(candidate: IceCandidate) {
+                    signalingRef.child("senderCandidates").push().setValue(mapOf(
+                        "sdpMid" to candidate.sdpMid,
+                        "sdpMLineIndex" to candidate.sdpMLineIndex,
+                        "sdp" to candidate.sdp
+                    ))
+                }
+                override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) {}
+                override fun onAddStream(stream: MediaStream) {}
+                override fun onRemoveStream(stream: MediaStream) {}
+                override fun onDataChannel(p0: DataChannel?) {}
+                override fun onIceConnectionReceivingChange(p0: Boolean) {}
+                override fun onIceConnectionChange(p0: PeerConnection.IceConnectionState?) {}
+                override fun onIceGatheringChange(p0: PeerConnection.IceGatheringState?) {}
+                override fun onSignalingChange(p0: PeerConnection.SignalingState?) {}
+                override fun onRenegotiationNeeded() {}
+                override fun onAddTrack(p0: RtpReceiver?, p1: Array<out MediaStream>?) {}
+            })
+
+            localAudioTrack?.let { peerConnection?.addTrack(it) }
+            localVideoTrack?.let { peerConnection?.addTrack(it) }
+
+            // Create offer
+            val constraints = MediaConstraints()
+            peerConnection?.createOffer(object : SdpObserver {
+                override fun onCreateSuccess(sdp: SessionDescription) {
+                    peerConnection?.setLocalDescription(object : SdpObserver {
+                        override fun onSetSuccess() {
+                            signalingRef.child("offer").setValue(mapOf(
+                                "type" to sdp.type.canonicalForm(),
+                                "sdp" to sdp.description
+                            ))
+                            runOnUiThread {
+                                Toast.makeText(this@MainActivity, "Streaming started", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                        override fun onSetFailure(p0: String?) {}
+                        override fun onCreateSuccess(p0: SessionDescription?) {}
+                        override fun onCreateFailure(p0: String?) {}
+                    }, sdp)
+                }
+                override fun onSetSuccess() {}
+                override fun onCreateFailure(p0: String?) {
+                    Log.e("Partypark", "Create offer failed: $p0")
+                }
+                override fun onSetFailure(p0: String?) {}
+            }, constraints)
+
+            // Listen for answer
+            signalingRef.child("answer").addValueEventListener(object : com.google.firebase.database.ValueEventListener {
+                override fun onDataChange(snapshot: com.google.firebase.database.DataSnapshot) {
+                    val answerMap = snapshot.value as? Map<*, *> ?: return
+                    val type = answerMap["type"] as? String ?: return
+                    val sdp = answerMap["sdp"] as? String ?: return
+                    val answer = SessionDescription(SessionDescription.Type.fromCanonicalForm(type), sdp)
+                    peerConnection?.setRemoteDescription(object : SdpObserver {
+                        override fun onSetSuccess() {}
+                        override fun onSetFailure(p0: String?) {}
+                        override fun onCreateSuccess(p0: SessionDescription?) {}
+                        override fun onCreateFailure(p0: String?) {}
+                    }, answer)
+                }
+                override fun onCancelled(error: com.google.firebase.database.DatabaseError) {}
+            })
+
+        } catch (e: Exception) {
+            Log.e("Partypark", "Stream start failed", e)
+            Toast.makeText(this, "Stream failed: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun createCameraCapturer(): CameraVideoCapturer? {
-        val enumerator = Camera2Enumerator(this)
-        for (name in enumerator.deviceNames) {
-            if (enumerator.isFrontFacing(name)) {
-                return enumerator.createCapturer(name, null)
+        return try {
+            val enumerator = Camera2Enumerator(this)
+            for (name in enumerator.deviceNames) {
+                if (enumerator.isFrontFacing(name)) {
+                    return enumerator.createCapturer(name, null)
+                }
             }
-        }
-        for (name in enumerator.deviceNames) {
-            if (!enumerator.isFrontFacing(name)) {
-                return enumerator.createCapturer(name, null)
+            for (name in enumerator.deviceNames) {
+                if (!enumerator.isFrontFacing(name)) {
+                    return enumerator.createCapturer(name, null)
+                }
             }
+            null
+        } catch (e: Exception) {
+            Log.e("Partypark", "Camera capturer failed", e)
+            null
         }
-        return null
     }
 
     private fun showActivationDialog() {
@@ -286,9 +307,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        videoCapturer?.stopCapture()
-        videoCapturer?.dispose()
+        try {
+            videoCapturer?.stopCapture()
+            videoCapturer?.dispose()
+        } catch (e: Exception) {}
         peerConnection?.close()
         peerConnectionFactory?.dispose()
+        eglBase?.release()
     }
 }
