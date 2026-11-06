@@ -17,12 +17,19 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.ktx.auth
 import com.google.firebase.database.ktx.database
 import com.google.firebase.ktx.Firebase
+import io.getstream.webrtc.android.PeerConnectionUtils
+import io.getstream.webrtc.android.WebRtcClient
+import org.webrtc.IceCandidate
+import org.webrtc.MediaConstraints
+import org.webrtc.SessionDescription
 import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var auth: FirebaseAuth
     private val prefs by lazy { getSharedPreferences("partypark", Context.MODE_PRIVATE) }
+
+    private var webRtcClient: WebRtcClient? = null
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -69,24 +76,70 @@ class MainActivity : AppCompatActivity() {
             val ownerUid = prefs.getString("ownerUid", null)
             if (ownerUid != null) {
                 registerDevice(ownerUid, name)
-                Toast.makeText(this, "Name saved", Toast.LENGTH_SHORT).show()
-                // Start WebRTC signaling after name is set
-                startWebRTCSignaling()
+                Toast.makeText(this, "Name saved — starting camera stream", Toast.LENGTH_SHORT).show()
+                startCameraStream()
             } else {
                 Toast.makeText(this, "Activate the app first", Toast.LENGTH_SHORT).show()
             }
         }
     }
 
-    private fun startWebRTCSignaling() {
+    private fun startCameraStream() {
         val deviceId = prefs.getString("deviceId", null) ?: return
         val signalingRef = Firebase.database.reference.child("signaling").child(deviceId)
 
-        // Placeholder: In the next step we will create the real offer and send it
-        Toast.makeText(this, "WebRTC signaling ready for device: $deviceId", Toast.LENGTH_LONG).show()
-
-        // Clean old signaling data
         signalingRef.removeValue()
+
+        webRtcClient = WebRtcClient(this, object : WebRtcClient.Listener {
+            override fun onIceCandidate(candidate: IceCandidate) {
+                signalingRef.child("senderCandidates").push().setValue(candidate.sdp)
+            }
+
+            override fun onAddStream(stream: org.webrtc.MediaStream) {}
+            override fun onRemoveStream(stream: org.webrtc.MediaStream) {}
+        })
+
+        // Start local camera + mic
+        webRtcClient?.startLocalMedia()
+
+        // Create offer
+        val constraints = MediaConstraints()
+        webRtcClient?.peerConnection?.createOffer(object : org.webrtc.SdpObserver {
+            override fun onCreateSuccess(sdp: SessionDescription) {
+                webRtcClient?.peerConnection?.setLocalDescription(object : org.webrtc.SdpObserver {
+                    override fun onSetSuccess() {
+                        signalingRef.child("offer").setValue(mapOf(
+                            "type" to sdp.type.canonicalForm(),
+                            "sdp" to sdp.description
+                        ))
+                        Toast.makeText(this@MainActivity, "Streaming started", Toast.LENGTH_SHORT).show()
+                    }
+                    override fun onSetFailure(p0: String?) {}
+                    override fun onCreateSuccess(p0: SessionDescription?) {}
+                    override fun onCreateFailure(p0: String?) {}
+                }, sdp)
+            }
+            override fun onSetSuccess() {}
+            override fun onCreateFailure(p0: String?) {}
+            override fun onSetFailure(p0: String?) {}
+        }, constraints)
+
+        // Listen for answer
+        signalingRef.child("answer").addValueEventListener(object : com.google.firebase.database.ValueEventListener {
+            override fun onDataChange(snapshot: com.google.firebase.database.DataSnapshot) {
+                val answerMap = snapshot.value as? Map<*, *> ?: return
+                val type = answerMap["type"] as? String ?: return
+                val sdp = answerMap["sdp"] as? String ?: return
+                val answer = SessionDescription(SessionDescription.Type.fromCanonicalForm(type), sdp)
+                webRtcClient?.peerConnection?.setRemoteDescription(object : org.webrtc.SdpObserver {
+                    override fun onSetSuccess() {}
+                    override fun onSetFailure(p0: String?) {}
+                    override fun onCreateSuccess(p0: SessionDescription?) {}
+                    override fun onCreateFailure(p0: String?) {}
+                }, answer)
+            }
+            override fun onCancelled(error: com.google.firebase.database.DatabaseError) {}
+        })
     }
 
     private fun showActivationDialog() {
@@ -169,5 +222,10 @@ class MainActivity : AppCompatActivity() {
         if (toRequest.isNotEmpty()) {
             permissionLauncher.launch(toRequest.toTypedArray())
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        webRtcClient?.disconnect()
     }
 }
