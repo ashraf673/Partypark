@@ -132,6 +132,7 @@ class MainActivity : AppCompatActivity() {
                     "sdp" to candidate.sdp
                 ))
             }
+            override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) {}
             override fun onAddStream(stream: MediaStream) {}
             override fun onRemoveStream(stream: MediaStream) {}
             override fun onDataChannel(p0: DataChannel?) {}
