@@ -16,6 +16,9 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.textfield.TextInputEditText
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.ktx.auth
+import com.google.firebase.database.ChildEventListener
+import com.google.firebase.database.DataSnapshot
+import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.ktx.database
 import com.google.firebase.ktx.Firebase
 import org.webrtc.*
@@ -32,6 +35,9 @@ class MainActivity : AppCompatActivity() {
     private var localAudioTrack: AudioTrack? = null
     private var videoCapturer: CameraVideoCapturer? = null
     private var eglBase: EglBase? = null
+
+    private val pendingViewerCandidates = mutableListOf<IceCandidate>()
+    private var remoteAnswerSet = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -92,6 +98,8 @@ class MainActivity : AppCompatActivity() {
             val signalingRef = Firebase.database.reference.child("signaling").child(deviceId)
 
             signalingRef.removeValue()
+            remoteAnswerSet = false
+            pendingViewerCandidates.clear()
 
             // Initialize WebRTC
             val options = PeerConnectionFactory.InitializationOptions.builder(this)
@@ -151,8 +159,31 @@ class MainActivity : AppCompatActivity() {
                 override fun onAddTrack(p0: RtpReceiver?, p1: Array<out MediaStream>?) {}
             })
 
-            localAudioTrack?.let { peerConnection?.addTrack(it) }
-            localVideoTrack?.let { peerConnection?.addTrack(it) }
+            val streamId = "partypark-live"
+            localAudioTrack?.let { peerConnection?.addTrack(it, listOf(streamId)) }
+            localVideoTrack?.let { peerConnection?.addTrack(it, listOf(streamId)) }
+
+            // Listen for viewer ICE candidates
+            signalingRef.child("viewerCandidates").addChildEventListener(object : ChildEventListener {
+                override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
+                    val mid = snapshot.child("sdpMid").getValue(String::class.java) ?: return
+                    val lineIndex = snapshot.child("sdpMLineIndex").getValue(Int::class.java) ?: return
+                    val candidateSdp = snapshot.child("sdp").getValue(String::class.java) ?: return
+                    val candidate = IceCandidate(mid, lineIndex, candidateSdp)
+
+                    if (remoteAnswerSet) {
+                        peerConnection?.addIceCandidate(candidate)
+                    } else {
+                        pendingViewerCandidates.add(candidate)
+                    }
+                }
+                override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
+                override fun onChildRemoved(snapshot: DataSnapshot) {}
+                override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
+                override fun onCancelled(error: DatabaseError) {
+                    Log.e("Partypark", "Viewer ICE listener failed", error.toException())
+                }
+            })
 
             // Create offer
             val constraints = MediaConstraints()
@@ -188,7 +219,13 @@ class MainActivity : AppCompatActivity() {
                     val sdp = answerMap["sdp"] as? String ?: return
                     val answer = SessionDescription(SessionDescription.Type.fromCanonicalForm(type), sdp)
                     peerConnection?.setRemoteDescription(object : SdpObserver {
-                        override fun onSetSuccess() {}
+                        override fun onSetSuccess() {
+                            remoteAnswerSet = true
+                            pendingViewerCandidates.forEach { candidate ->
+                                peerConnection?.addIceCandidate(candidate)
+                            }
+                            pendingViewerCandidates.clear()
+                        }
                         override fun onSetFailure(p0: String?) {}
                         override fun onCreateSuccess(p0: SessionDescription?) {}
                         override fun onCreateFailure(p0: String?) {}
