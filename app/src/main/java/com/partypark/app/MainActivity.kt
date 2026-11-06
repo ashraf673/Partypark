@@ -1,10 +1,12 @@
 package com.partypark.app
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Looper
 import android.util.Log
 import android.widget.EditText
 import android.widget.Toast
@@ -12,6 +14,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.textfield.TextInputEditText
 import com.google.firebase.auth.FirebaseAuth
@@ -38,6 +45,9 @@ class MainActivity : AppCompatActivity() {
 
     private val pendingViewerCandidates = mutableListOf<IceCandidate>()
     private var remoteAnswerSet = false
+
+    private val fusedLocationClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
+    private var locationCallback: LocationCallback? = null
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -86,10 +96,46 @@ class MainActivity : AppCompatActivity() {
                 registerDevice(ownerUid, name)
                 Toast.makeText(this, "Name saved — starting stream", Toast.LENGTH_SHORT).show()
                 startCameraStream()
+                startLocationUpdates()
             } else {
                 Toast.makeText(this, "Activate the app first", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startLocationUpdates() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+
+        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 10000)
+            .setMinUpdateIntervalMillis(5000)
+            .build()
+
+        locationCallback = object : LocationCallback() {
+            override fun onLocationResult(result: LocationResult) {
+                val location = result.lastLocation ?: return
+                val ownerUid = prefs.getString("ownerUid", null) ?: return
+                val deviceId = prefs.getString("deviceId", null) ?: return
+
+                val locationData = mapOf(
+                    "lat" to location.latitude,
+                    "lng" to location.longitude,
+                    "timestamp" to System.currentTimeMillis()
+                )
+
+                Firebase.database.reference
+                    .child("users")
+                    .child(ownerUid)
+                    .child("devices")
+                    .child(deviceId)
+                    .child("location")
+                    .setValue(locationData)
+            }
+        }
+
+        fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback!!, Looper.getMainLooper())
     }
 
     private fun startCameraStream() {
@@ -101,7 +147,6 @@ class MainActivity : AppCompatActivity() {
             remoteAnswerSet = false
             pendingViewerCandidates.clear()
 
-            // Initialize WebRTC
             val options = PeerConnectionFactory.InitializationOptions.builder(this)
                 .setEnableInternalTracer(true)
                 .createInitializationOptions()
@@ -117,12 +162,10 @@ class MainActivity : AppCompatActivity() {
                 .setVideoDecoderFactory(decoderFactory)
                 .createPeerConnectionFactory()
 
-            // Audio
             val audioConstraints = MediaConstraints()
             val audioSource = peerConnectionFactory?.createAudioSource(audioConstraints)
             localAudioTrack = peerConnectionFactory?.createAudioTrack("audio", audioSource)
 
-            // Video
             videoCapturer = createCameraCapturer()
             if (videoCapturer == null) {
                 Toast.makeText(this, "Camera not available", Toast.LENGTH_SHORT).show()
@@ -135,7 +178,6 @@ class MainActivity : AppCompatActivity() {
             videoCapturer?.startCapture(640, 480, 30)
             localVideoTrack = peerConnectionFactory?.createVideoTrack("video", videoSource)
 
-            // PeerConnection
             val iceServers = listOf(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
             val rtcConfig = PeerConnection.RTCConfiguration(iceServers)
 
@@ -163,7 +205,6 @@ class MainActivity : AppCompatActivity() {
             localAudioTrack?.let { peerConnection?.addTrack(it, listOf(streamId)) }
             localVideoTrack?.let { peerConnection?.addTrack(it, listOf(streamId)) }
 
-            // Listen for viewer ICE candidates
             signalingRef.child("viewerCandidates").addChildEventListener(object : ChildEventListener {
                 override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
                     val mid = snapshot.child("sdpMid").getValue(String::class.java) ?: return
@@ -185,7 +226,6 @@ class MainActivity : AppCompatActivity() {
                 }
             })
 
-            // Create offer
             val constraints = MediaConstraints()
             peerConnection?.createOffer(object : SdpObserver {
                 override fun onCreateSuccess(sdp: SessionDescription) {
@@ -211,7 +251,6 @@ class MainActivity : AppCompatActivity() {
                 override fun onSetFailure(p0: String?) {}
             }, constraints)
 
-            // Listen for answer
             signalingRef.child("answer").addValueEventListener(object : com.google.firebase.database.ValueEventListener {
                 override fun onDataChange(snapshot: com.google.firebase.database.DataSnapshot) {
                     val answerMap = snapshot.value as? Map<*, *> ?: return
@@ -344,6 +383,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        locationCallback?.let { fusedLocationClient.removeLocationUpdates(it) }
         try {
             videoCapturer?.stopCapture()
             videoCapturer?.dispose()
