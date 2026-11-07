@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.os.Looper
 import android.util.Log
 import android.widget.EditText
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -58,11 +59,31 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
 
         auth = Firebase.auth
-
         requestBasicPermissions()
+
+        val isActivated = prefs.getBoolean("activated", false)
+        val savedName = prefs.getString("deviceName", null)
+
+        if (isActivated && savedName != null) {
+            showHomeScreen(savedName)
+            startCameraStream()
+            startLocationUpdates()
+            listenForCommands()
+        } else {
+            showSetupScreen()
+        }
+    }
+
+    private fun showHomeScreen(name: String) {
+        setContentView(R.layout.activity_home)
+        findViewById<TextView>(R.id.device_name_text).text = name
+        findViewById<TextView>(R.id.status_text).text = "Online • Ready"
+    }
+
+    private fun showSetupScreen() {
+        setContentView(R.layout.activity_main)
 
         val activateCodeBtn = findViewById<MaterialButton>(R.id.activate_code_btn)
         val nameInput = findViewById<TextInputEditText>(R.id.name_input)
@@ -70,23 +91,10 @@ class MainActivity : AppCompatActivity() {
         val scannerContainer = findViewById<android.widget.FrameLayout>(R.id.scanner_container)
 
         val isActivated = prefs.getBoolean("activated", false)
-        val savedName = prefs.getString("deviceName", null)
-
         if (isActivated) {
             activateCodeBtn.text = "Activated"
             activateCodeBtn.isEnabled = false
             activateCodeBtn.alpha = 0.5f
-
-            if (savedName != null) {
-                nameInput.setText(savedName)
-                nameInput.isEnabled = false
-                doneBtn.isEnabled = false
-                doneBtn.alpha = 0.5f
-                // Auto-start stream if already named
-                startCameraStream()
-                startLocationUpdates()
-                listenForCommands()
-            }
         }
 
         activateCodeBtn.setOnClickListener {
@@ -111,10 +119,8 @@ class MainActivity : AppCompatActivity() {
             if (ownerUid != null) {
                 prefs.edit().putString("deviceName", name).apply()
                 registerDevice(ownerUid, name)
-                Toast.makeText(this, "Name saved — starting stream", Toast.LENGTH_SHORT).show()
-                nameInput.isEnabled = false
-                doneBtn.isEnabled = false
-                doneBtn.alpha = 0.5f
+                Toast.makeText(this, "Setup complete", Toast.LENGTH_SHORT).show()
+                showHomeScreen(name)
                 startCameraStream()
                 startLocationUpdates()
                 listenForCommands()
@@ -313,9 +319,6 @@ class MainActivity : AppCompatActivity() {
                                 "type" to sdp.type.canonicalForm(),
                                 "sdp" to sdp.description
                             ))
-                            runOnUiThread {
-                                Toast.makeText(this@MainActivity, "Streaming started", Toast.LENGTH_SHORT).show()
-                            }
                         }
                         override fun onSetFailure(p0: String?) {}
                         override fun onCreateSuccess(p0: SessionDescription?) {}
