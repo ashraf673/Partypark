@@ -70,10 +70,23 @@ class MainActivity : AppCompatActivity() {
         val scannerContainer = findViewById<android.widget.FrameLayout>(R.id.scanner_container)
 
         val isActivated = prefs.getBoolean("activated", false)
+        val savedName = prefs.getString("deviceName", null)
+
         if (isActivated) {
             activateCodeBtn.text = "Activated"
             activateCodeBtn.isEnabled = false
             activateCodeBtn.alpha = 0.5f
+
+            if (savedName != null) {
+                nameInput.setText(savedName)
+                nameInput.isEnabled = false
+                doneBtn.isEnabled = false
+                doneBtn.alpha = 0.5f
+                // Auto-start stream if already named
+                startCameraStream()
+                startLocationUpdates()
+                listenForCommands()
+            }
         }
 
         activateCodeBtn.setOnClickListener {
@@ -96,8 +109,12 @@ class MainActivity : AppCompatActivity() {
             }
             val ownerUid = prefs.getString("ownerUid", null)
             if (ownerUid != null) {
+                prefs.edit().putString("deviceName", name).apply()
                 registerDevice(ownerUid, name)
                 Toast.makeText(this, "Name saved — starting stream", Toast.LENGTH_SHORT).show()
+                nameInput.isEnabled = false
+                doneBtn.isEnabled = false
+                doneBtn.alpha = 0.5f
                 startCameraStream()
                 startLocationUpdates()
                 listenForCommands()
@@ -221,8 +238,11 @@ class MainActivity : AppCompatActivity() {
                 .createPeerConnectionFactory()
 
             val audioConstraints = MediaConstraints()
+            audioConstraints.mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
+            audioConstraints.mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
             val audioSource = peerConnectionFactory?.createAudioSource(audioConstraints)
             localAudioTrack = peerConnectionFactory?.createAudioTrack("audio", audioSource)
+            localAudioTrack?.setEnabled(true)
 
             videoCapturer = createCameraCapturer()
             if (videoCapturer == null) {
