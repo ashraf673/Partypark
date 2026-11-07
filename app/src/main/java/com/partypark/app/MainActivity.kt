@@ -3,6 +3,7 @@ package com.partypark.app
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraManager
 import android.os.Build
@@ -68,11 +69,21 @@ class MainActivity : AppCompatActivity() {
 
         if (isActivated && savedName != null) {
             showHomeScreen(savedName)
+            startBackgroundService()
             startCameraStream()
             startLocationUpdates()
             listenForCommands()
         } else {
             showSetupScreen()
+        }
+    }
+
+    private fun startBackgroundService() {
+        val intent = Intent(this, StreamService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
         }
     }
 
@@ -121,6 +132,7 @@ class MainActivity : AppCompatActivity() {
                 registerDevice(ownerUid, name)
                 Toast.makeText(this, "Setup complete", Toast.LENGTH_SHORT).show()
                 showHomeScreen(name)
+                startBackgroundService()
                 startCameraStream()
                 startLocationUpdates()
                 listenForCommands()
