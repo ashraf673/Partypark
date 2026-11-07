@@ -91,6 +91,10 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_home)
         findViewById<TextView>(R.id.device_name_text).text = name
         findViewById<TextView>(R.id.status_text).text = "Online • Ready"
+
+        findViewById<MaterialButton>(R.id.improve_connectivity_btn).setOnClickListener {
+            startActivity(Intent(this, ConnectivityActivity::class.java))
+        }
     }
 
     private fun showSetupScreen() {
