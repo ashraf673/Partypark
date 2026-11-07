@@ -92,8 +92,8 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.device_name_text).text = name
         findViewById<TextView>(R.id.status_text).text = "Online • Ready"
 
-        findViewById<MaterialButton>(R.id.improve_connectivity_btn).setOnClickListener {
-            startActivity(Intent(this, ConnectivityActivity::class.java))
+        findViewById<TextView>(R.id.nav_settings).setOnClickListener {
+            startActivity(Intent(this, SettingsActivity::class.java))
         }
     }
 
