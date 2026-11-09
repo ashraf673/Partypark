@@ -1,15 +1,11 @@
 package com.partypark.app
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.hardware.camera2.CameraManager
 import android.os.Build
 import android.os.Bundle
-import android.os.Looper
-import android.util.Log
 import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
@@ -17,18 +13,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import com.google.android.gms.location.LocationCallback
-import com.google.android.gms.location.LocationRequest
-import com.google.android.gms.location.LocationResult
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.textfield.TextInputEditText
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.ktx.auth
-import com.google.firebase.database.ChildEventListener
-import com.google.firebase.database.DataSnapshot
-import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.ktx.database
 import com.google.firebase.ktx.Firebase
 import java.util.UUID
@@ -37,10 +25,6 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var auth: FirebaseAuth
     private val prefs by lazy { getSharedPreferences("partypark", Context.MODE_PRIVATE) }
-
-    private val fusedLocationClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
-    private var locationCallback: LocationCallback? = null
-    private var flashlightOn = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -58,8 +42,6 @@ class MainActivity : AppCompatActivity() {
         if (isActivated && savedName != null) {
             showHomeScreen(savedName)
             startBackgroundService()
-            startLocationUpdates()
-            listenForCommands()
         } else {
             showSetupScreen()
         }
@@ -124,85 +106,10 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Setup complete", Toast.LENGTH_SHORT).show()
                 showHomeScreen(name)
                 startBackgroundService()
-                startLocationUpdates()
-                listenForCommands()
             } else {
                 Toast.makeText(this, "Activate the app first", Toast.LENGTH_SHORT).show()
             }
         }
-    }
-
-    private fun listenForCommands() {
-        val deviceId = prefs.getString("deviceId", null) ?: return
-        Firebase.database.reference
-            .child("commands")
-            .child(deviceId)
-            .addChildEventListener(object : ChildEventListener {
-                override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                    val command = snapshot.getValue(String::class.java) ?: return
-                    handleCommand(command)
-                    snapshot.ref.removeValue()
-                }
-                override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
-                override fun onChildRemoved(snapshot: DataSnapshot) {}
-                override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
-                override fun onCancelled(error: DatabaseError) {}
-            })
-    }
-
-    private fun handleCommand(command: String) {
-        when (command) {
-            "flashlight" -> toggleFlashlight()
-            // Camera/mic controls will be handled by service in future update
-        }
-    }
-
-    private fun toggleFlashlight() {
-        try {
-            val cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            val cameraId = cameraManager.cameraIdList.firstOrNull { id ->
-                cameraManager.getCameraCharacteristics(id).get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
-            } ?: return
-            flashlightOn = !flashlightOn
-            cameraManager.setTorchMode(cameraId, flashlightOn)
-        } catch (e: Exception) {
-            Log.e("Partypark", "Flashlight failed", e)
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun startLocationUpdates() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            return
-        }
-
-        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 10000)
-            .setMinUpdateIntervalMillis(5000)
-            .build()
-
-        locationCallback = object : LocationCallback() {
-            override fun onLocationResult(result: LocationResult) {
-                val location = result.lastLocation ?: return
-                val ownerUid = prefs.getString("ownerUid", null) ?: return
-                val deviceId = prefs.getString("deviceId", null) ?: return
-
-                val locationData = mapOf(
-                    "lat" to location.latitude,
-                    "lng" to location.longitude,
-                    "timestamp" to System.currentTimeMillis()
-                )
-
-                Firebase.database.reference
-                    .child("users")
-                    .child(ownerUid)
-                    .child("devices")
-                    .child(deviceId)
-                    .child("location")
-                    .setValue(locationData)
-            }
-        }
-
-        fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback!!, Looper.getMainLooper())
     }
 
     private fun showActivationDialog() {
@@ -285,11 +192,5 @@ class MainActivity : AppCompatActivity() {
         if (toRequest.isNotEmpty()) {
             permissionLauncher.launch(toRequest.toTypedArray())
         }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        locationCallback?.let { fusedLocationClient.removeLocationUpdates(it) }
-        // Do not stop the StreamService here — it should keep running
     }
 }
