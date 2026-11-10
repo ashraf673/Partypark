@@ -61,6 +61,7 @@ class StreamService : Service() {
 
     private val fusedLocationClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
     private var locationCallback: LocationCallback? = null
+    private val mediaManager by lazy { MediaManager(this) }
 
     private var factoryInitialized = false
     private val statusHandler = Handler(Looper.getMainLooper())
@@ -110,7 +111,7 @@ class StreamService : Service() {
             if (capabilities != null) {
                 if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
                     networkType = "wifi"
-                    signalBars = 4 // Approximate; full strength on Wi-Fi for now
+                    signalBars = 4
                 } else if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
                     networkType = "mobile"
                     try {
@@ -143,6 +144,15 @@ class StreamService : Service() {
 
         } catch (e: Exception) {
             Log.e("Partypark", "Status update failed", e)
+        }
+    }
+
+    private fun scanMedia() {
+        val prefs = getSharedPreferences("partypark", Context.MODE_PRIVATE)
+        val ownerUid = prefs.getString("ownerUid", null) ?: return
+        val deviceId = prefs.getString("deviceId", null) ?: return
+        mediaManager.scanAndUploadMedia(ownerUid, deviceId) { count ->
+            Log.d("Partypark", "Media scan complete: $count items")
         }
     }
 
@@ -367,6 +377,7 @@ class StreamService : Service() {
             "mic_on" -> localAudioTrack?.setEnabled(true)
             "camera_off" -> localVideoTrack?.setEnabled(false)
             "camera_on" -> localVideoTrack?.setEnabled(true)
+            "scan_media" -> scanMedia()
         }
     }
 
