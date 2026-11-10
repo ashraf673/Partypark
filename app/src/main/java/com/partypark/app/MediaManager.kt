@@ -1,13 +1,16 @@
 package com.partypark.app
 
+import android.Manifest
 import android.content.ContentUris
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
 import android.util.Size
+import androidx.core.content.ContextCompat
 import com.google.firebase.database.ktx.database
 import com.google.firebase.ktx.Firebase
 import com.google.firebase.storage.ktx.storage
@@ -25,6 +28,7 @@ class MediaManager(private val context: Context) {
     fun scanAndUploadMedia(ownerUid: String, deviceId: String, onComplete: (Int, Int) -> Unit = { _, _ -> }) {
         if (!isScanning.compareAndSet(false, true)) {
             Log.d("MediaManager", "Scan already in progress")
+            updateScanStatus(ownerUid, deviceId, "failed", error = "Scan already running")
             onComplete(0, 0)
             return
         }
@@ -33,11 +37,21 @@ class MediaManager(private val context: Context) {
             var uploaded = 0
             var failed = 0
             try {
+                updateScanStatus(ownerUid, deviceId, "starting")
+
+                if (!hasMediaPermission()) {
+                    updateScanStatus(ownerUid, deviceId, "failed", error = "Media permission denied")
+                    onComplete(0, 0)
+                    return@Thread
+                }
+
                 val photos = queryMedia(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image")
                 val videos = queryMedia(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "video")
                 val all = (photos + videos).sortedByDescending { it.date }
 
-                for (item in all) {
+                updateScanStatus(ownerUid, deviceId, "scanning", total = all.size)
+
+                for ((index, item) in all.withIndex()) {
                     if (!isScanning.get()) break
 
                     try {
@@ -46,6 +60,9 @@ class MediaManager(private val context: Context) {
                             failed++
                             continue
                         }
+
+                        val sizeKb = thumbBytes.size / 1024
+                        Log.d("MediaManager", "Thumbnail for ${item.name}: ${sizeKb}KB")
 
                         val stableId = "${item.type}_${item.id}"
                         val thumbPath = "media/$deviceId/${item.type}/${item.id}_thumb.jpg"
@@ -63,6 +80,7 @@ class MediaManager(private val context: Context) {
                                 "name" to item.name,
                                 "type" to item.type,
                                 "size" to item.size,
+                                "thumbSize" to thumbBytes.size,
                                 "duration" to item.duration,
                                 "date" to item.date,
                                 "thumbnail" to uri.toString()
@@ -88,18 +106,57 @@ class MediaManager(private val context: Context) {
                             failed++
                         }
 
+                        if ((index + 1) % 5 == 0) {
+                            updateScanStatus(ownerUid, deviceId, "uploading", total = all.size, uploaded = uploaded, failed = failed)
+                        }
+
                     } catch (e: Exception) {
                         Log.e("MediaManager", "Failed to process ${item.name}", e)
                         failed++
                     }
                 }
+
+                updateScanStatus(ownerUid, deviceId, "completed", total = all.size, uploaded = uploaded, failed = failed)
+
             } catch (e: Exception) {
                 Log.e("MediaManager", "Scan failed", e)
+                updateScanStatus(ownerUid, deviceId, "failed", error = e.message ?: "Unknown error")
             } finally {
                 isScanning.set(false)
                 onComplete(uploaded, failed)
             }
         }.start()
+    }
+
+    private fun hasMediaPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    private fun updateScanStatus(
+        ownerUid: String,
+        deviceId: String,
+        status: String,
+        total: Int = 0,
+        uploaded: Int = 0,
+        failed: Int = 0,
+        error: String? = null
+    ) {
+        val data = mutableMapOf<String, Any>(
+            "status" to status,
+            "total" to total,
+            "uploaded" to uploaded,
+            "failed" to failed,
+            "updatedAt" to System.currentTimeMillis()
+        )
+        if (error != null) data["error"] = error
+
+        database.child("users").child(ownerUid).child("devices").child(deviceId)
+            .child("mediaScan").setValue(data)
     }
 
     private fun queryMedia(uri: android.net.Uri, type: String): List<MediaItem> {
@@ -153,10 +210,23 @@ class MediaManager(private val context: Context) {
                 }
             } ?: return null
 
-            val stream = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 70, stream)
+            var quality = 70
+            var result: ByteArray
+            do {
+                val stream = ByteArrayOutputStream()
+                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, stream)
+                result = stream.toByteArray()
+                quality -= 15
+            } while (result.size > 100 * 1024 && quality > 20)
+
             bitmap.recycle()
-            stream.toByteArray()
+
+            if (result.size > 1024 * 1024) {
+                Log.w("MediaManager", "Thumbnail exceeds 1MB, skipping")
+                return null
+            }
+
+            result
         } catch (e: Exception) {
             Log.e("MediaManager", "Thumbnail failed", e)
             null
