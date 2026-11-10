@@ -41,7 +41,8 @@ class MediaManager(private val context: Context) {
                     if (!isScanning.get()) break
 
                     try {
-                        val thumbBytes = createThumbnail(item.uri) ?: run {
+                        val thumbBytes = createThumbnail(item.uri)
+                        if (thumbBytes == null) {
                             failed++
                             continue
                         }
@@ -80,7 +81,6 @@ class MediaManager(private val context: Context) {
                             latch.countDown()
                         }
 
-                        // Wait without silent timeout overlap — cancel previous if needed
                         val completed = latch.await(45, TimeUnit.SECONDS)
                         if (completed && success) {
                             uploaded++
@@ -143,7 +143,6 @@ class MediaManager(private val context: Context) {
             val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 context.contentResolver.loadThumbnail(uri, Size(200, 200), null)
             } else {
-                // Fallback for Android 8/9
                 context.contentResolver.openInputStream(uri)?.use { input ->
                     val opts = BitmapFactory.Options().apply { inSampleSize = 8 }
                     BitmapFactory.decodeStream(input, null, opts)
