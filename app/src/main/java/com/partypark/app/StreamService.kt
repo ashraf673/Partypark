@@ -46,6 +46,7 @@ class StreamService : Service() {
     private var remoteAnswerSet = false
     private var isFrontCamera = true
     private var flashlightOn = false
+    private var isStreaming = false
 
     private val fusedLocationClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
     private var locationCallback: LocationCallback? = null
@@ -59,7 +60,8 @@ class StreamService : Service() {
         val notification = createNotification()
         startForeground(NOTIFICATION_ID, notification)
 
-        startStreaming()
+        // Do NOT start camera/mic automatically.
+        // Only start when Watchnow requests it.
         startLocationUpdates()
         listenForCommands()
 
@@ -69,6 +71,10 @@ class StreamService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun startStreaming() {
+        if (isStreaming) {
+            cleanupStreaming()
+        }
+
         try {
             val prefs = getSharedPreferences("partypark", Context.MODE_PRIVATE)
             val deviceId = prefs.getString("deviceId", null) ?: return
@@ -102,7 +108,7 @@ class StreamService : Service() {
 
             videoCapturer = createCameraCapturer()
             if (videoCapturer == null) {
-                Log.e("Partypark", "Camera not available in service")
+                Log.e("Partypark", "Camera not available")
                 return
             }
 
@@ -202,9 +208,41 @@ class StreamService : Service() {
                 override fun onCancelled(error: com.google.firebase.database.DatabaseError) {}
             })
 
+            isStreaming = true
+            Log.d("Partypark", "Streaming started")
+
         } catch (e: Exception) {
-            Log.e("Partypark", "Service stream start failed", e)
+            Log.e("Partypark", "Stream start failed", e)
+            cleanupStreaming()
         }
+    }
+
+    private fun cleanupStreaming() {
+        try {
+            videoCapturer?.stopCapture()
+            videoCapturer?.dispose()
+            videoCapturer = null
+        } catch (e: Exception) {}
+
+        try {
+            peerConnection?.close()
+            peerConnection = null
+        } catch (e: Exception) {}
+
+        try {
+            peerConnectionFactory?.dispose()
+            peerConnectionFactory = null
+        } catch (e: Exception) {}
+
+        try {
+            eglBase?.release()
+            eglBase = null
+        } catch (e: Exception) {}
+
+        localVideoTrack = null
+        localAudioTrack = null
+        isStreaming = false
+        Log.d("Partypark", "Streaming stopped and resources released")
     }
 
     private fun listenForCommands() {
@@ -228,6 +266,8 @@ class StreamService : Service() {
 
     private fun handleCommand(command: String) {
         when (command) {
+            "start_stream" -> startStreaming()
+            "stop_stream" -> cleanupStreaming()
             "switch_camera" -> switchCamera()
             "flashlight" -> toggleFlashlight()
             "mic_off" -> localAudioTrack?.setEnabled(false)
@@ -241,7 +281,6 @@ class StreamService : Service() {
         videoCapturer?.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
             override fun onCameraSwitchDone(isFront: Boolean) {
                 isFrontCamera = isFront
-                Log.d("Partypark", if (isFront) "Switched to front camera" else "Switched to back camera")
             }
             override fun onCameraSwitchError(error: String?) {
                 Log.e("Partypark", "Camera switch failed: $error")
@@ -332,7 +371,7 @@ class StreamService : Service() {
     private fun createNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Partypark")
-            .setContentText("Streaming active")
+            .setContentText("Ready")
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
@@ -342,12 +381,6 @@ class StreamService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         locationCallback?.let { fusedLocationClient.removeLocationUpdates(it) }
-        try {
-            videoCapturer?.stopCapture()
-            videoCapturer?.dispose()
-        } catch (e: Exception) {}
-        peerConnection?.close()
-        peerConnectionFactory?.dispose()
-        eglBase?.release()
+        cleanupStreaming()
     }
 }
