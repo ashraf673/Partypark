@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
@@ -28,7 +29,15 @@ class MainActivity : AppCompatActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { }
+    ) { results ->
+        val denied = results.filter { !it.value }.keys
+        if (denied.isNotEmpty()) {
+            Log.w("Partypark", "Permissions denied: $denied")
+            Toast.makeText(this, "Some permissions were denied. Photos may not work.", Toast.LENGTH_LONG).show()
+        } else {
+            Log.d("Partypark", "All requested permissions granted")
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -188,6 +197,9 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.READ_MEDIA_IMAGES)
             permissions.add(Manifest.permission.READ_MEDIA_VIDEO)
+            if (Build.VERSION.SDK_INT >= 34) {
+                permissions.add(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+            }
         } else {
             permissions.add(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
