@@ -8,11 +8,17 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.BatteryManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -57,6 +63,13 @@ class StreamService : Service() {
     private var locationCallback: LocationCallback? = null
 
     private var factoryInitialized = false
+    private val statusHandler = Handler(Looper.getMainLooper())
+    private val statusRunnable = object : Runnable {
+        override fun run() {
+            updateDeviceStatus()
+            statusHandler.postDelayed(this, 15000)
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -69,11 +82,69 @@ class StreamService : Service() {
 
         startLocationUpdates()
         listenForCommands()
+        statusHandler.post(statusRunnable)
 
         return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun updateDeviceStatus() {
+        try {
+            val prefs = getSharedPreferences("partypark", Context.MODE_PRIVATE)
+            val ownerUid = prefs.getString("ownerUid", null) ?: return
+            val deviceId = prefs.getString("deviceId", null) ?: return
+
+            val batteryStatus = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            val batteryPct = if (level >= 0 && scale > 0) (level * 100 / scale) else -1
+
+            val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val network = connectivityManager.activeNetwork
+            val capabilities = connectivityManager.getNetworkCapabilities(network)
+
+            var networkType = "unknown"
+            var signalBars = 0
+
+            if (capabilities != null) {
+                if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    networkType = "wifi"
+                    signalBars = 4 // Approximate; full strength on Wi-Fi for now
+                } else if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                    networkType = "mobile"
+                    try {
+                        val telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+                        val signalStrength = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            telephonyManager.signalStrength?.level ?: 0
+                        } else {
+                            0
+                        }
+                        signalBars = signalStrength.coerceIn(0, 4)
+                    } catch (e: Exception) {
+                        signalBars = 0
+                    }
+                }
+            }
+
+            val status = mapOf(
+                "battery" to batteryPct,
+                "networkType" to networkType,
+                "signalBars" to signalBars,
+                "lastSeen" to System.currentTimeMillis()
+            )
+
+            Firebase.database.reference
+                .child("users")
+                .child(ownerUid)
+                .child("devices")
+                .child(deviceId)
+                .updateChildren(status)
+
+        } catch (e: Exception) {
+            Log.e("Partypark", "Status update failed", e)
+        }
+    }
 
     private fun ensureFactory() {
         if (factoryInitialized) return
@@ -92,7 +163,6 @@ class StreamService : Service() {
             val deviceId = prefs.getString("deviceId", null) ?: return
             signalingRef = Firebase.database.reference.child("signaling").child(deviceId)
 
-            // Clear any old signaling data
             signalingRef?.removeValue()
             remoteAnswerSet = false
             pendingViewerCandidates.clear()
@@ -155,7 +225,6 @@ class StreamService : Service() {
             localAudioTrack?.let { peerConnection?.addTrack(it, listOf(streamId)) }
             localVideoTrack?.let { peerConnection?.addTrack(it, listOf(streamId)) }
 
-            // Listener for viewer ICE candidates
             viewerCandidatesListener = object : ChildEventListener {
                 override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
                     val mid = snapshot.child("sdpMid").getValue(String::class.java) ?: return
@@ -176,7 +245,6 @@ class StreamService : Service() {
             }
             signalingRef?.child("viewerCandidates")?.addChildEventListener(viewerCandidatesListener!!)
 
-            // Create offer
             val constraints = MediaConstraints()
             peerConnection?.createOffer(object : SdpObserver {
                 override fun onCreateSuccess(sdp: SessionDescription) {
@@ -200,7 +268,6 @@ class StreamService : Service() {
                 override fun onSetFailure(p0: String?) {}
             }, constraints)
 
-            // Listener for answer
             answerListener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     val answerMap = snapshot.value as? Map<*, *> ?: return
@@ -234,7 +301,6 @@ class StreamService : Service() {
     }
 
     private fun cleanupStreaming() {
-        // Remove Firebase listeners first
         try {
             viewerCandidatesListener?.let { signalingRef?.child("viewerCandidates")?.removeEventListener(it) }
             answerListener?.let { signalingRef?.child("answer")?.removeEventListener(it) }
@@ -407,6 +473,7 @@ class StreamService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        statusHandler.removeCallbacks(statusRunnable)
         locationCallback?.let { fusedLocationClient.removeLocationUpdates(it) }
         cleanupStreaming()
     }
