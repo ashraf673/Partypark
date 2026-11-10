@@ -24,6 +24,7 @@ import com.google.android.gms.location.Priority
 import com.google.firebase.database.ChildEventListener
 import com.google.firebase.database.DataSnapshot
 import com.google.firebase.database.DatabaseError
+import com.google.firebase.database.ValueEventListener
 import com.google.firebase.database.ktx.database
 import com.google.firebase.ktx.Firebase
 import org.webrtc.*
@@ -48,8 +49,14 @@ class StreamService : Service() {
     private var flashlightOn = false
     private var isStreaming = false
 
+    private var viewerCandidatesListener: ChildEventListener? = null
+    private var answerListener: ValueEventListener? = null
+    private var signalingRef: com.google.firebase.database.DatabaseReference? = null
+
     private val fusedLocationClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
     private var locationCallback: LocationCallback? = null
+
+    private var factoryInitialized = false
 
     override fun onCreate() {
         super.onCreate()
@@ -60,8 +67,6 @@ class StreamService : Service() {
         val notification = createNotification()
         startForeground(NOTIFICATION_ID, notification)
 
-        // Do NOT start camera/mic automatically.
-        // Only start when Watchnow requests it.
         startLocationUpdates()
         listenForCommands()
 
@@ -70,24 +75,29 @@ class StreamService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun ensureFactory() {
+        if (factoryInitialized) return
+        val options = PeerConnectionFactory.InitializationOptions.builder(this)
+            .setEnableInternalTracer(true)
+            .createInitializationOptions()
+        PeerConnectionFactory.initialize(options)
+        factoryInitialized = true
+    }
+
     private fun startStreaming() {
-        if (isStreaming) {
-            cleanupStreaming()
-        }
+        cleanupStreaming()
 
         try {
             val prefs = getSharedPreferences("partypark", Context.MODE_PRIVATE)
             val deviceId = prefs.getString("deviceId", null) ?: return
-            val signalingRef = Firebase.database.reference.child("signaling").child(deviceId)
+            signalingRef = Firebase.database.reference.child("signaling").child(deviceId)
 
-            signalingRef.removeValue()
+            // Clear any old signaling data
+            signalingRef?.removeValue()
             remoteAnswerSet = false
             pendingViewerCandidates.clear()
 
-            val options = PeerConnectionFactory.InitializationOptions.builder(this)
-                .setEnableInternalTracer(true)
-                .createInitializationOptions()
-            PeerConnectionFactory.initialize(options)
+            ensureFactory()
 
             eglBase = EglBase.create()
 
@@ -123,7 +133,7 @@ class StreamService : Service() {
 
             peerConnection = peerConnectionFactory?.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
                 override fun onIceCandidate(candidate: IceCandidate) {
-                    signalingRef.child("senderCandidates").push().setValue(mapOf(
+                    signalingRef?.child("senderCandidates")?.push()?.setValue(mapOf(
                         "sdpMid" to candidate.sdpMid,
                         "sdpMLineIndex" to candidate.sdpMLineIndex,
                         "sdp" to candidate.sdp
@@ -145,7 +155,8 @@ class StreamService : Service() {
             localAudioTrack?.let { peerConnection?.addTrack(it, listOf(streamId)) }
             localVideoTrack?.let { peerConnection?.addTrack(it, listOf(streamId)) }
 
-            signalingRef.child("viewerCandidates").addChildEventListener(object : ChildEventListener {
+            // Listener for viewer ICE candidates
+            viewerCandidatesListener = object : ChildEventListener {
                 override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
                     val mid = snapshot.child("sdpMid").getValue(String::class.java) ?: return
                     val lineIndex = snapshot.child("sdpMLineIndex").getValue(Int::class.java) ?: return
@@ -162,16 +173,19 @@ class StreamService : Service() {
                 override fun onChildRemoved(snapshot: DataSnapshot) {}
                 override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
                 override fun onCancelled(error: DatabaseError) {}
-            })
+            }
+            signalingRef?.child("viewerCandidates")?.addChildEventListener(viewerCandidatesListener!!)
 
+            // Create offer
             val constraints = MediaConstraints()
             peerConnection?.createOffer(object : SdpObserver {
                 override fun onCreateSuccess(sdp: SessionDescription) {
                     peerConnection?.setLocalDescription(object : SdpObserver {
                         override fun onSetSuccess() {
-                            signalingRef.child("offer").setValue(mapOf(
+                            signalingRef?.child("offer")?.setValue(mapOf(
                                 "type" to sdp.type.canonicalForm(),
-                                "sdp" to sdp.description
+                                "sdp" to sdp.description,
+                                "ts" to System.currentTimeMillis()
                             ))
                         }
                         override fun onSetFailure(p0: String?) {}
@@ -186,8 +200,9 @@ class StreamService : Service() {
                 override fun onSetFailure(p0: String?) {}
             }, constraints)
 
-            signalingRef.child("answer").addValueEventListener(object : com.google.firebase.database.ValueEventListener {
-                override fun onDataChange(snapshot: com.google.firebase.database.DataSnapshot) {
+            // Listener for answer
+            answerListener = object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
                     val answerMap = snapshot.value as? Map<*, *> ?: return
                     val type = answerMap["type"] as? String ?: return
                     val sdp = answerMap["sdp"] as? String ?: return
@@ -205,8 +220,9 @@ class StreamService : Service() {
                         override fun onCreateFailure(p0: String?) {}
                     }, answer)
                 }
-                override fun onCancelled(error: com.google.firebase.database.DatabaseError) {}
-            })
+                override fun onCancelled(error: DatabaseError) {}
+            }
+            signalingRef?.child("answer")?.addValueEventListener(answerListener!!)
 
             isStreaming = true
             Log.d("Partypark", "Streaming started")
@@ -218,6 +234,14 @@ class StreamService : Service() {
     }
 
     private fun cleanupStreaming() {
+        // Remove Firebase listeners first
+        try {
+            viewerCandidatesListener?.let { signalingRef?.child("viewerCandidates")?.removeEventListener(it) }
+            answerListener?.let { signalingRef?.child("answer")?.removeEventListener(it) }
+        } catch (e: Exception) {}
+        viewerCandidatesListener = null
+        answerListener = null
+
         try {
             videoCapturer?.stopCapture()
             videoCapturer?.dispose()
@@ -242,7 +266,10 @@ class StreamService : Service() {
         localVideoTrack = null
         localAudioTrack = null
         isStreaming = false
-        Log.d("Partypark", "Streaming stopped and resources released")
+        remoteAnswerSet = false
+        pendingViewerCandidates.clear()
+
+        Log.d("Partypark", "Streaming cleaned up")
     }
 
     private fun listenForCommands() {
