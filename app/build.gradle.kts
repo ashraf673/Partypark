@@ -53,4 +53,9 @@ dependencies {
 
     // WebRTC
     implementation("io.getstream:stream-webrtc-android:1.3.10")
+
+    // ExoPlayer for video playback
+    implementation("androidx.media3:media3-exoplayer:1.2.1")
+    implementation("androidx.media3:media3-ui:1.2.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.2.1")
 }
