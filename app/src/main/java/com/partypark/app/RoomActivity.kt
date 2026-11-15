@@ -2,16 +2,22 @@ package com.partypark.app
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.view.View
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.button.MaterialButton
@@ -34,6 +40,10 @@ class RoomActivity : AppCompatActivity() {
     private lateinit var messageInput: EditText
     private lateinit var playerWebView: WebView
     private lateinit var playerPlaceholder: TextView
+    private lateinit var playerContainer: FrameLayout
+
+    private var exoPlayer: ExoPlayer? = null
+    private var playerView: PlayerView? = null
 
     private var currentRoomCode: String? = null
     private val messages = mutableListOf<ChatMessage>()
@@ -50,12 +60,14 @@ class RoomActivity : AppCompatActivity() {
         messageInput = findViewById(R.id.message_input)
         playerWebView = findViewById(R.id.player_webview)
         playerPlaceholder = findViewById(R.id.player_placeholder)
+        playerContainer = findViewById(R.id.player_container)
 
         chatAdapter = ChatAdapter(messages)
         chatList.layoutManager = LinearLayoutManager(this)
         chatList.adapter = chatAdapter
 
         setupWebView()
+        setupExoPlayer()
 
         findViewById<MaterialButton>(R.id.create_room_btn).setOnClickListener { showCreateDialog() }
         findViewById<MaterialButton>(R.id.join_room_btn).setOnClickListener { showJoinDialog() }
@@ -68,8 +80,23 @@ class RoomActivity : AppCompatActivity() {
     private fun setupWebView() {
         playerWebView.settings.javaScriptEnabled = true
         playerWebView.settings.mediaPlaybackRequiresUserGesture = false
+        playerWebView.settings.domStorageEnabled = true
+        playerWebView.settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         playerWebView.webChromeClient = WebChromeClient()
         playerWebView.webViewClient = WebViewClient()
+    }
+
+    private fun setupExoPlayer() {
+        exoPlayer = ExoPlayer.Builder(this).build()
+        playerView = PlayerView(this).apply {
+            player = exoPlayer
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            visibility = View.GONE
+        }
+        playerContainer.addView(playerView, 0)
     }
 
     private fun showCreateDialog() {
@@ -135,8 +162,8 @@ class RoomActivity : AppCompatActivity() {
     private fun enterRoom(code: String) {
         currentRoomCode = code
         roomCodeText.text = "Room: $code"
-        lobbyLayout.visibility = android.view.View.GONE
-        roomLayout.visibility = android.view.View.VISIBLE
+        lobbyLayout.visibility = View.GONE
+        roomLayout.visibility = View.VISIBLE
         listenToMessages(code)
         listenToPlayer(code)
     }
@@ -179,7 +206,7 @@ class RoomActivity : AppCompatActivity() {
 
     private fun showLoadDialog() {
         val input = EditText(this)
-        input.hint = "YouTube or Drive URL"
+        input.hint = "Paste any video URL"
         AlertDialog.Builder(this)
             .setTitle("Load Video")
             .setView(input)
@@ -197,20 +224,52 @@ class RoomActivity : AppCompatActivity() {
     }
 
     private fun loadVideo(url: String) {
-        playerPlaceholder.visibility = android.view.View.GONE
-        val embed = if (url.contains("youtube.com") || url.contains("youtu.be")) {
-            val id = extractYoutubeId(url)
-            "https://www.youtube.com/embed/$id?autoplay=1"
-        } else {
-            url
+        playerPlaceholder.visibility = View.GONE
+
+        when {
+            isDirectVideo(url) -> playWithExoPlayer(url)
+            isYoutube(url) -> playYoutube(url)
+            else -> playInWebView(url)
         }
+    }
+
+    private fun isDirectVideo(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.endsWith(".mp4") || lower.endsWith(".webm") || lower.endsWith(".mkv") ||
+               lower.endsWith(".m3u8") || lower.contains(".mp4?") || lower.contains(".m3u8?")
+    }
+
+    private fun isYoutube(url: String): Boolean {
+        return url.contains("youtube.com") || url.contains("youtu.be")
+    }
+
+    private fun playWithExoPlayer(url: String) {
+        playerWebView.visibility = View.GONE
+        playerView?.visibility = View.VISIBLE
+        exoPlayer?.setMediaItem(MediaItem.fromUri(Uri.parse(url)))
+        exoPlayer?.prepare()
+        exoPlayer?.playWhenReady = true
+    }
+
+    private fun playYoutube(url: String) {
+        playerView?.visibility = View.GONE
+        playerWebView.visibility = View.VISIBLE
+        val id = extractYoutubeId(url)
+        val embed = "https://www.youtube-nocookie.com/embed/$id?autoplay=1&playsinline=1&rel=0"
         playerWebView.loadUrl(embed)
+    }
+
+    private fun playInWebView(url: String) {
+        playerView?.visibility = View.GONE
+        playerWebView.visibility = View.VISIBLE
+        playerWebView.loadUrl(url)
     }
 
     private fun extractYoutubeId(url: String): String {
         return when {
             url.contains("youtu.be/") -> url.substringAfter("youtu.be/").substringBefore("?")
             url.contains("v=") -> url.substringAfter("v=").substringBefore("&")
+            url.contains("/embed/") -> url.substringAfter("/embed/").substringBefore("?")
             else -> url
         }
     }
@@ -228,10 +287,19 @@ class RoomActivity : AppCompatActivity() {
         currentRoomCode = null
         messages.clear()
         chatAdapter.notifyDataSetChanged()
-        roomLayout.visibility = android.view.View.GONE
-        lobbyLayout.visibility = android.view.View.VISIBLE
+        roomLayout.visibility = View.GONE
+        lobbyLayout.visibility = View.VISIBLE
+        exoPlayer?.stop()
         playerWebView.loadUrl("about:blank")
-        playerPlaceholder.visibility = android.view.View.VISIBLE
+        playerPlaceholder.visibility = View.VISIBLE
+        playerView?.visibility = View.GONE
+        playerWebView.visibility = View.VISIBLE
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        exoPlayer?.release()
+        exoPlayer = null
     }
 }
 
