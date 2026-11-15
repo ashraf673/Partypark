@@ -43,6 +43,10 @@
             android:name=".ConnectivityActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".RoomActivity"
+            android:exported="false" />
+
         <service
             android:name=".StreamService"
             android:enabled="true"
