@@ -33,9 +33,6 @@ class MainActivity : AppCompatActivity() {
         val denied = results.filter { !it.value }.keys
         if (denied.isNotEmpty()) {
             Log.w("Partypark", "Permissions denied: $denied")
-            Toast.makeText(this, "Some permissions were denied. Photos may not work.", Toast.LENGTH_LONG).show()
-        } else {
-            Log.d("Partypark", "All requested permissions granted")
         }
     }
 
@@ -72,6 +69,10 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<TextView>(R.id.nav_settings).setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
+        }
+
+        findViewById<MaterialButton>(R.id.watch_together_btn).setOnClickListener {
+            startActivity(Intent(this, RoomActivity::class.java))
         }
     }
 
