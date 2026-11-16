@@ -1,10 +1,12 @@
 package com.partypark.app
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
+import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -77,11 +79,20 @@ class RoomActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.send_btn).setOnClickListener { sendMessage() }
     }
 
+    @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
-        playerWebView.settings.javaScriptEnabled = true
-        playerWebView.settings.mediaPlaybackRequiresUserGesture = false
-        playerWebView.settings.domStorageEnabled = true
-        playerWebView.settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        val settings = playerWebView.settings
+        settings.javaScriptEnabled = true
+        settings.domStorageEnabled = true
+        settings.mediaPlaybackRequiresUserGesture = false
+        settings.databaseEnabled = true
+        settings.loadWithOverviewMode = true
+        settings.useWideViewPort = true
+        // Android WebView adds "wv". YouTube rejects that and shows Error 153.
+        settings.userAgentString =
+            "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(playerWebView, true)
         playerWebView.webChromeClient = WebChromeClient()
         playerWebView.webViewClient = WebViewClient()
     }
@@ -206,7 +217,7 @@ class RoomActivity : AppCompatActivity() {
 
     private fun showLoadDialog() {
         val input = EditText(this)
-        input.hint = "Paste any video URL"
+        input.hint = "YouTube, Drive, Vimeo, or a direct .mp4 / .m3u8 link"
         AlertDialog.Builder(this)
             .setTitle("Load Video")
             .setView(input)
@@ -225,53 +236,125 @@ class RoomActivity : AppCompatActivity() {
 
     private fun loadVideo(url: String) {
         playerPlaceholder.visibility = View.GONE
-
+        val yt = youtubeId(url)
+        val vimeo = vimeoId(url)
+        val daily = dailymotionId(url)
+        val drive = driveId(url)
         when {
             isDirectVideo(url) -> playWithExoPlayer(url)
-            isYoutube(url) -> playYoutube(url)
-            else -> playInWebView(url)
+            yt != null -> playYoutube(yt)
+            vimeo != null -> playEmbed("https://player.vimeo.com/video/$vimeo?autoplay=1&playsinline=1")
+            daily != null -> playEmbed("https://www.dailymotion.com/embed/video/$daily?autoplay=1")
+            drive != null -> playEmbed("https://drive.google.com/file/d/$drive/preview")
+            else -> playPage(url)
         }
     }
 
     private fun isDirectVideo(url: String): Boolean {
-        val lower = url.lowercase()
-        return lower.endsWith(".mp4") || lower.endsWith(".webm") || lower.endsWith(".mkv") ||
-               lower.endsWith(".m3u8") || lower.contains(".mp4?") || lower.contains(".m3u8?")
+        val path = url.lowercase().substringBefore('#')
+        return Regex("\\.(mp4|webm|mkv|mov|m4v|ogv|m3u8|mpd)($|\\?)").containsMatchIn(path)
     }
 
-    private fun isYoutube(url: String): Boolean {
-        return url.contains("youtube.com") || url.contains("youtu.be")
+    private fun youtubeId(url: String): String? {
+        val patterns = listOf(
+            Regex("youtu\\.be/([\\w-]{11})"),
+            Regex("[?&]v=([\\w-]{11})"),
+            Regex("youtube\\.com/embed/([\\w-]{11})"),
+            Regex("youtube\\.com/shorts/([\\w-]{11})"),
+            Regex("youtube\\.com/live/([\\w-]{11})")
+        )
+        return patterns.firstNotNullOfOrNull { it.find(url)?.groupValues?.get(1) }
+    }
+
+    private fun vimeoId(url: String): String? {
+        return Regex("vimeo\\.com/(?:video/)?(\\d+)").find(url)?.groupValues?.get(1)
+    }
+
+    private fun dailymotionId(url: String): String? {
+        return Regex("(?:dailymotion\\.com/(?:embed/)?video|dai\\.ly)/([a-zA-Z0-9]+)").find(url)?.groupValues?.get(1)
+    }
+
+    private fun driveId(url: String): String? {
+        if (!url.contains("drive.google.com") && !url.contains("docs.google.com")) return null
+        return Regex("/d/([a-zA-Z0-9_-]+)").find(url)?.groupValues?.get(1)
+            ?: Regex("[?&]id=([a-zA-Z0-9_-]+)").find(url)?.groupValues?.get(1)
+    }
+
+    private fun showWeb() {
+        exoPlayer?.pause()
+        playerView?.visibility = View.GONE
+        playerWebView.visibility = View.VISIBLE
     }
 
     private fun playWithExoPlayer(url: String) {
         playerWebView.visibility = View.GONE
+        playerWebView.loadUrl("about:blank")
         playerView?.visibility = View.VISIBLE
         exoPlayer?.setMediaItem(MediaItem.fromUri(Uri.parse(url)))
         exoPlayer?.prepare()
         exoPlayer?.playWhenReady = true
     }
 
-    private fun playYoutube(url: String) {
-        playerView?.visibility = View.GONE
-        playerWebView.visibility = View.VISIBLE
-        val id = extractYoutubeId(url)
-        val embed = "https://www.youtube-nocookie.com/embed/$id?autoplay=1&playsinline=1&rel=0"
-        playerWebView.loadUrl(embed)
+    private fun playYoutube(id: String) {
+        showWeb()
+        // Same method Kosmi uses: a real page origin, then the YouTube IFrame API.
+        // Opening the embed URL directly is what triggers Error 153.
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta name="referrer" content="strict-origin-when-cross-origin">
+              <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+              <style>html,body,#player{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden}</style>
+            </head>
+            <body>
+              <div id="player"></div>
+              <script src="https://www.youtube.com/iframe_api"></script>
+              <script>
+                var player;
+                function onYouTubeIframeAPIReady() {
+                  player = new YT.Player('player', {
+                    width: '100%',
+                    height: '100%',
+                    videoId: '$id',
+                    playerVars: {
+                      autoplay: 1,
+                      playsinline: 1,
+                      rel: 0,
+                      modestbranding: 1,
+                      origin: '$APP_ORIGIN'
+                    }
+                  });
+                }
+              </script>
+            </body>
+            </html>
+        """.trimIndent()
+        playerWebView.loadDataWithBaseURL(APP_ORIGIN, html, "text/html", "UTF-8", null)
     }
 
-    private fun playInWebView(url: String) {
-        playerView?.visibility = View.GONE
-        playerWebView.visibility = View.VISIBLE
+    private fun playEmbed(embedUrl: String) {
+        showWeb()
+        val safe = embedUrl.replace("\"", "")
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta name="referrer" content="strict-origin-when-cross-origin">
+              <meta name="viewport" content="width=device-width, initial-scale=1">
+              <style>html,body{margin:0;background:#000;height:100%}iframe{border:0;width:100%;height:100%}</style>
+            </head>
+            <body>
+              <iframe src="$safe" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
+            </body>
+            </html>
+        """.trimIndent()
+        playerWebView.loadDataWithBaseURL(APP_ORIGIN, html, "text/html", "UTF-8", null)
+    }
+
+    private fun playPage(url: String) {
+        showWeb()
         playerWebView.loadUrl(url)
-    }
-
-    private fun extractYoutubeId(url: String): String {
-        return when {
-            url.contains("youtu.be/") -> url.substringAfter("youtu.be/").substringBefore("?")
-            url.contains("v=") -> url.substringAfter("v=").substringBefore("&")
-            url.contains("/embed/") -> url.substringAfter("/embed/").substringBefore("?")
-            else -> url
-        }
     }
 
     private fun shareRoom() {
@@ -300,6 +383,10 @@ class RoomActivity : AppCompatActivity() {
         super.onDestroy()
         exoPlayer?.release()
         exoPlayer = null
+    }
+
+    companion object {
+        private const val APP_ORIGIN = "https://partypark.app"
     }
 }
 
