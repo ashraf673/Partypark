@@ -24,7 +24,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -67,7 +70,10 @@ class RoomActivity : AppCompatActivity() {
     private var applyingRemote = false
     private var acceptLocalEvents = false
     private var lastAppliedTs = 0L
+    private var lastBy: String? = null
     private var driveFallbackId: String? = null
+    private var driveRetried = false
+    private var driveResourceKey: String? = null
 
     private var playerListener: ValueEventListener? = null
     private var messageListener: ChildEventListener? = null
@@ -86,10 +92,17 @@ class RoomActivity : AppCompatActivity() {
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 if (loadedUrl == null) return false
-                if (e.y > gestureLayer.height * 0.72f) return false
-                if (youtubeMode) return false
+                if (e.y > gestureLayer.height * 0.62f) return false
                 val delta = if (e.x < gestureLayer.width / 2f) -10.0 else 10.0
-                seekBy(delta)
+                if (usingExo) seekBy(delta)
+                else if (youtubeMode) seekYoutube(delta)
+                return true
+            }
+
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                if (!usingExo || e.y > gestureLayer.height * 0.62f) return false
+                val view = playerView ?: return false
+                if (view.isControllerFullyVisible) view.hideController() else view.showController()
                 return true
             }
         })
@@ -128,8 +141,9 @@ class RoomActivity : AppCompatActivity() {
         setupWebView()
         setupExoPlayer()
         gestureLayer.setOnTouchListener { _, event ->
-            val handled = gestureDetector.onTouchEvent(event)
-            handled && usingExo
+            if (event.y > gestureLayer.height * 0.62f) return@setOnTouchListener false
+            gestureDetector.onTouchEvent(event)
+            true
         }
 
         findViewById<MaterialButton>(R.id.create_room_btn).setOnClickListener { showCreateDialog() }
@@ -141,6 +155,7 @@ class RoomActivity : AppCompatActivity() {
         fullscreenBtn.setOnClickListener { toggleFullscreen() }
 
         refreshRooms()
+        playerContainer.postDelayed(heartbeat, 4000)
     }
 
     override fun onResume() {
@@ -180,7 +195,17 @@ class RoomActivity : AppCompatActivity() {
     }
 
     private fun setupExoPlayer() {
-        exoPlayer = ExoPlayer.Builder(this).build()
+        val httpFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent(
+                "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+            )
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(20000)
+            .setReadTimeoutMs(20000)
+        val dataSourceFactory = DefaultDataSource.Factory(this, httpFactory)
+        exoPlayer = ExoPlayer.Builder(this)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+            .build()
         exoPlayer?.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (applyingRemote || !acceptLocalEvents || !usingExo) return
@@ -200,13 +225,30 @@ class RoomActivity : AppCompatActivity() {
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_READY) driveFallbackId = null
+                if (playbackState == Player.STATE_READY) {
+                    driveFallbackId = null
+                    driveRetried = false
+                }
             }
 
             override fun onPlayerError(error: PlaybackException) {
                 val id = driveFallbackId ?: return
+                if (!driveRetried) {
+                    driveRetried = true
+                    val key = driveResourceKey?.let { "&resourcekey=$it" } ?: ""
+                    playWithExoPlayer(
+                        "https://drive.google.com/uc?export=download&id=$id&confirm=t$key",
+                        (exoPlayer?.currentPosition ?: 0L) / 1000.0,
+                        true
+                    )
+                    return
+                }
                 driveFallbackId = null
-                Toast.makeText(this@RoomActivity, "Opening Drive preview", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    this@RoomActivity,
+                    "Drive preview only. Share the file as Anyone with the link so everyone can control it.",
+                    Toast.LENGTH_LONG
+                ).show()
                 playEmbed("https://drive.google.com/file/d/$id/preview")
             }
         })
@@ -332,6 +374,7 @@ class RoomActivity : AppCompatActivity() {
         val playing = snapshot.child("playing").getValue(Boolean::class.java) ?: true
         val actionTs = longOf(snapshot, "actionTs")
         val by = snapshot.child("by").getValue(String::class.java)
+        lastBy = by
 
         if (url != loadedUrl) {
             loadedUrl = url
@@ -351,7 +394,53 @@ class RoomActivity : AppCompatActivity() {
         val elapsed = if (playing) {
             ((System.currentTimeMillis() - actionTs) / 1000.0).coerceAtLeast(0.0)
         } else 0.0
-        applyRemote(position + elapsed, playing)
+        considerRemote(position + elapsed, playing)
+    }
+
+    private fun considerRemote(target: Double, playing: Boolean) {
+        if (usingExo) {
+            val now = (exoPlayer?.currentPosition ?: 0L) / 1000.0
+            val samePlay = exoPlayer?.playWhenReady == playing
+            if (samePlay && kotlin.math.abs(now - target) < 1.5) return
+            applyRemote(target, playing)
+            return
+        }
+        if (!youtubeMode) return
+        playerWebView.evaluateJavascript(
+            "(function(){if(!window.player||!player.getCurrentTime)return '';" +
+                "var on=player.getPlayerState&&player.getPlayerState()==1?1:0;" +
+                "return player.getCurrentTime()+','+on;})()"
+        ) { raw ->
+            val parts = raw?.trim()?.trim('"')?.split(',')
+            val now = parts?.getOrNull(0)?.toDoubleOrNull()
+            val isPlaying = parts?.getOrNull(1) == "1"
+            if (now != null && isPlaying == playing && kotlin.math.abs(now - target) < 1.5) return@evaluateJavascript
+            applyRemote(target, playing)
+        }
+    }
+
+    private val heartbeat = object : Runnable {
+        override fun run() {
+            syncHeartbeat()
+            playerContainer.postDelayed(this, 4000)
+        }
+    }
+
+    private fun syncHeartbeat() {
+        if (!acceptLocalEvents || applyingRemote || currentRoomCode == null || loadedUrl == null) return
+        if (lastBy != myDeviceId()) return
+        if (usingExo && exoPlayer?.isPlaying == true) {
+            pushState((exoPlayer?.currentPosition ?: 0L) / 1000.0, true)
+            return
+        }
+        if (!youtubeMode) return
+        playerWebView.evaluateJavascript(
+            "(function(){if(!window.player||!player.getCurrentTime||!player.getPlayerState)return '';" +
+                "if(player.getPlayerState()!=1)return '';return ''+player.getCurrentTime();})()"
+        ) { raw ->
+            val t = raw?.trim()?.trim('"')?.toDoubleOrNull() ?: return@evaluateJavascript
+            if (lastBy == myDeviceId() && !applyingRemote) pushState(t, true)
+        }
     }
 
     private fun pushState(position: Double, playing: Boolean) {
@@ -360,6 +449,7 @@ class RoomActivity : AppCompatActivity() {
         val url = loadedUrl ?: return
         val ts = System.currentTimeMillis()
         lastAppliedTs = ts
+        lastBy = myDeviceId()
         db.child("rooms").child(code).child("player").updateChildren(mapOf(
             "url" to url,
             "position" to position,
@@ -382,6 +472,17 @@ class RoomActivity : AppCompatActivity() {
         playerContainer.postDelayed({ applyingRemote = false }, 1200)
     }
 
+    private fun seekYoutube(deltaSec: Double) {
+        val js = "(function(){if(!window.player||!player.getCurrentTime)return '';" +
+            "var t=Math.max(0,player.getCurrentTime()+(" + deltaSec + "));" +
+            "window.suppressUntil=Date.now()+1800;player.seekTo(t,true);return ''+t;})()"
+        playerWebView.evaluateJavascript(js) { raw ->
+            val t = raw?.trim()?.trim('"')?.toDoubleOrNull() ?: return@evaluateJavascript
+            pushState(t, true)
+            flash(if (deltaSec > 0) "+10s" else "-10s")
+        }
+    }
+
     private fun seekBy(deltaSec: Double) {
         if (loadedUrl == null) return
         if (usingExo) {
@@ -389,10 +490,10 @@ class RoomActivity : AppCompatActivity() {
             val duration = (exoPlayer?.duration ?: 0L) / 1000.0
             var target = (now + deltaSec).coerceAtLeast(0.0)
             if (duration > 0) target = target.coerceAtMost(duration)
+            pushState(target, exoPlayer?.playWhenReady == true)
             applyingRemote = true
             exoPlayer?.seekTo((target * 1000).toLong())
             playerContainer.postDelayed({ applyingRemote = false }, 400)
-            pushState(target, exoPlayer?.playWhenReady == true)
             flash(if (deltaSec > 0) "+10s" else "-10s")
         }
     }
@@ -433,6 +534,7 @@ class RoomActivity : AppCompatActivity() {
         val code = currentRoomCode ?: return
         loadedUrl = url
         acceptLocalEvents = false
+        lastBy = myDeviceId()
         val ts = System.currentTimeMillis()
         lastAppliedTs = ts
         db.child("rooms").child(code).child("player").setValue(mapOf(
@@ -466,7 +568,10 @@ class RoomActivity : AppCompatActivity() {
 
     private fun playDrive(id: String, startSec: Double, playing: Boolean) {
         driveFallbackId = id
-        val direct = "https://drive.google.com/uc?export=download&id=$id&confirm=t"
+        driveRetried = false
+        driveResourceKey = resourceKeyFrom(loadedUrl)
+        val key = driveResourceKey?.let { "&resourcekey=$it" } ?: ""
+        val direct = "https://drive.usercontent.google.com/download?id=$id&export=download&confirm=t$key"
         playWithExoPlayer(direct, startSec, playing)
     }
 
@@ -533,11 +638,13 @@ class RoomActivity : AppCompatActivity() {
                 }
                 setInterval(function() {
                   if (Date.now() < window.suppressUntil || !player || !player.getCurrentTime) return;
+                  var st = player.getPlayerState();
                   var t = player.getCurrentTime();
-                  if (player.getPlayerState() === YT.PlayerState.PLAYING && lastT > 0 && Math.abs(t - lastT) > 2.5) {
-                    Android.onPlayback(t, true);
+                  var active = st === YT.PlayerState.PLAYING || st === YT.PlayerState.PAUSED;
+                  if (active && lastT > 0 && Math.abs(t - lastT) > 2.5) {
+                    Android.onPlayback(t, st === YT.PlayerState.PLAYING);
                   }
-                  if (player.getPlayerState() === YT.PlayerState.PLAYING) lastT = t;
+                  if (active) lastT = t;
                 }, 700);
               </script>
             </body>
@@ -743,14 +850,22 @@ class RoomActivity : AppCompatActivity() {
     }
 
     private fun driveId(url: String): String? {
-        if (!url.contains("drive.google.com") && !url.contains("docs.google.com")) return null
+        if (!url.contains("drive.google.com") && !url.contains("docs.google.com") && !url.contains("drive.usercontent.google.com")) {
+            return null
+        }
         return Regex("/d/([a-zA-Z0-9_-]+)").find(url)?.groupValues?.get(1)
             ?: Regex("[?&]id=([a-zA-Z0-9_-]+)").find(url)?.groupValues?.get(1)
+    }
+
+    private fun resourceKeyFrom(url: String?): String? {
+        if (url == null) return null
+        return Regex("[?&]resourcekey=([^&#]+)").find(url)?.groupValues?.get(1)
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     override fun onDestroy() {
+        playerContainer.removeCallbacks(heartbeat)
         stopListening()
         exoPlayer?.release()
         exoPlayer = null
