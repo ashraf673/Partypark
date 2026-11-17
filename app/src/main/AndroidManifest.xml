@@ -45,6 +45,7 @@
 
         <activity
             android:name=".RoomActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
             android:exported="false" />
 
         <service
