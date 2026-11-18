@@ -8,4 +8,10 @@
         <item name="colorOnSecondary">@color/black</item>
         <item name="android:statusBarColor">?attr/colorPrimaryVariant</item>
     </style>
+
+    <style name="Theme.Partypark.NoActionBar" parent="Theme.Partypark">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:windowFullscreen">false</item>
+    </style>
 </resources>
