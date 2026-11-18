@@ -3,12 +3,13 @@ package com.partypark.app
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Bundle
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -17,6 +18,7 @@ import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -58,6 +60,11 @@ class RoomActivity : AppCompatActivity() {
     private lateinit var seekHint: TextView
     private lateinit var gestureLayer: View
     private lateinit var fullscreenBtn: MaterialButton
+    private lateinit var playerControls: LinearLayout
+    private lateinit var playPauseBtn: TextView
+    private lateinit var positionText: TextView
+    private lateinit var durationText: TextView
+    private lateinit var playerSeek: SeekBar
 
     private var exoPlayer: ExoPlayer? = null
     private var playerView: PlayerView? = null
@@ -67,6 +74,8 @@ class RoomActivity : AppCompatActivity() {
     private var usingExo = false
     private var youtubeMode = false
     private var fullscreen = false
+    private var controlsVisible = false
+    private var userSeeking = false
     private var applyingRemote = false
     private var acceptLocalEvents = false
     private var lastAppliedTs = 0L
@@ -85,6 +94,7 @@ class RoomActivity : AppCompatActivity() {
     private lateinit var roomAdapter: RoomListAdapter
 
     private val hideHint = Runnable { seekHint.visibility = View.GONE }
+    private val hideControls = Runnable { hidePlayerControls() }
 
     private val gestureDetector by lazy {
         GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
@@ -92,7 +102,6 @@ class RoomActivity : AppCompatActivity() {
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 if (loadedUrl == null) return false
-                if (e.y > gestureLayer.height * 0.62f) return false
                 val delta = if (e.x < gestureLayer.width / 2f) -10.0 else 10.0
                 if (usingExo) seekBy(delta)
                 else if (youtubeMode) seekYoutube(delta)
@@ -100,9 +109,8 @@ class RoomActivity : AppCompatActivity() {
             }
 
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                if (!usingExo || e.y > gestureLayer.height * 0.62f) return false
-                val view = playerView ?: return false
-                if (view.isControllerFullyVisible) view.hideController() else view.showController()
+                if (loadedUrl == null) return false
+                togglePlayerControls()
                 return true
             }
         })
@@ -125,6 +133,11 @@ class RoomActivity : AppCompatActivity() {
         seekHint = findViewById(R.id.seek_hint)
         gestureLayer = findViewById(R.id.gesture_layer)
         fullscreenBtn = findViewById(R.id.fullscreen_btn)
+        playerControls = findViewById(R.id.player_controls)
+        playPauseBtn = findViewById(R.id.play_pause_btn)
+        positionText = findViewById(R.id.position_text)
+        durationText = findViewById(R.id.duration_text)
+        playerSeek = findViewById(R.id.player_seek)
 
         chatAdapter = ChatAdapter(messages)
         chatList.layoutManager = LinearLayoutManager(this)
@@ -140,8 +153,8 @@ class RoomActivity : AppCompatActivity() {
 
         setupWebView()
         setupExoPlayer()
+        setupPlayerControls()
         gestureLayer.setOnTouchListener { _, event ->
-            if (event.y > gestureLayer.height * 0.62f) return@setOnTouchListener false
             gestureDetector.onTouchEvent(event)
             true
         }
@@ -152,10 +165,11 @@ class RoomActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.leave_btn).setOnClickListener { leaveRoom() }
         findViewById<MaterialButton>(R.id.load_btn).setOnClickListener { showLoadDialog() }
         findViewById<MaterialButton>(R.id.send_btn).setOnClickListener { sendMessage() }
-        fullscreenBtn.setOnClickListener { toggleFullscreen() }
+        fullscreenBtn.setOnClickListener { showRotateHint() }
 
         refreshRooms()
         playerContainer.postDelayed(heartbeat, 4000)
+        playerContainer.post(progressTick)
     }
 
     override fun onResume() {
@@ -163,10 +177,25 @@ class RoomActivity : AppCompatActivity() {
         if (lobbyLayout.visibility == View.VISIBLE) refreshRooms()
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyOrientation()
+    }
+
+    private var lastBackAt = 0L
+    private var holdChrome = false
+
     @Deprecated("Back goes to the room list first")
     override fun onBackPressed() {
         if (fullscreen) {
-            toggleFullscreen()
+            val now = System.currentTimeMillis()
+            if (now - lastBackAt < 2000) {
+                holdChrome = true
+                setWatchFullscreen(false)
+            } else {
+                lastBackAt = now
+                Toast.makeText(this, "Rotate to portrait to exit full screen", Toast.LENGTH_SHORT).show()
+            }
             return
         }
         if (roomLayout.visibility == View.VISIBLE) {
@@ -246,18 +275,14 @@ class RoomActivity : AppCompatActivity() {
                 driveFallbackId = null
                 Toast.makeText(
                     this@RoomActivity,
-                    "Drive preview only. Share the file as Anyone with the link so everyone can control it.",
+                    "This Drive file can't use Partypark controls. Share it as Anyone with the link.",
                     Toast.LENGTH_LONG
                 ).show()
-                playEmbed("https://drive.google.com/file/d/$id/preview")
             }
         })
         playerView = PlayerView(this).apply {
             player = exoPlayer
-            useController = true
-            controllerShowTimeoutMs = 2500
-            setShowNextButton(false)
-            setShowPreviousButton(false)
+            useController = false
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -337,7 +362,9 @@ class RoomActivity : AppCompatActivity() {
         chatAdapter.notifyDataSetChanged()
         loadedUrl = null
         lastAppliedTs = 0L
+        hidePlayerControls()
         listenToRoom(code)
+        applyOrientation()
     }
 
     private fun listenToRoom(code: String) {
@@ -622,8 +649,12 @@ class RoomActivity : AppCompatActivity() {
                     playerVars: {
                       autoplay: $autoplay,
                       playsinline: 1,
+                      controls: 0,
+                      disablekb: 1,
+                      fs: 0,
                       rel: 0,
                       modestbranding: 1,
+                      iv_load_policy: 3,
                       start: $start,
                       origin: '$APP_ORIGIN'
                     },
@@ -680,34 +711,188 @@ class RoomActivity : AppCompatActivity() {
     }
 
     @Suppress("DEPRECATION")
-    private fun toggleFullscreen() {
-        fullscreen = !fullscreen
-        val playerLp = playerContainer.layoutParams as LinearLayout.LayoutParams
+    private fun showRotateHint() {
+        AlertDialog.Builder(this)
+            .setTitle("Full screen")
+            .setMessage("Rotate your phone to landscape mode to enter full screen. Only the movie will play. Rotate back to portrait to exit.")
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyOrientation() {
+        val inRoom = roomLayout.visibility == View.VISIBLE
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        if (!landscape) holdChrome = false
+        setWatchFullscreen(inRoom && landscape && !holdChrome)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun setWatchFullscreen(on: Boolean) {
+        if (on == fullscreen) return
+        fullscreen = on
+        val header = findViewById<View>(R.id.room_header)
         val loadBtn = findViewById<View>(R.id.load_btn)
         val messageBar = findViewById<View>(R.id.message_bar)
-        if (fullscreen) {
+        val playerLp = playerContainer.layoutParams as LinearLayout.LayoutParams
+        if (on) {
+            supportActionBar?.hide()
+            header.visibility = View.GONE
             loadBtn.visibility = View.GONE
             chatList.visibility = View.GONE
             messageBar.visibility = View.GONE
             playerLp.height = 0
             playerLp.weight = 1f
-            fullscreenBtn.text = "Exit"
-            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            hidePlayerControls()
+            window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
             window.decorView.systemUiVisibility =
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
                     View.SYSTEM_UI_FLAG_FULLSCREEN or
-                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
         } else {
+            supportActionBar?.show()
+            header.visibility = View.VISIBLE
             loadBtn.visibility = View.VISIBLE
             chatList.visibility = View.VISIBLE
             messageBar.visibility = View.VISIBLE
             playerLp.height = dp(220)
             playerLp.weight = 0f
-            fullscreenBtn.text = "Full"
-            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
             window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         }
         playerContainer.layoutParams = playerLp
+    }
+
+    private fun setupPlayerControls() {
+        playerContainer.keepScreenOn = true
+        playPauseBtn.setOnClickListener { onPlayPauseClicked() }
+        playerSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser) positionText.text = formatTime(progress.toLong())
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar) {
+                userSeeking = true
+                playerControls.removeCallbacks(hideControls)
+            }
+
+            override fun onStopTrackingTouch(seekBar: SeekBar) {
+                userSeeking = false
+                val sec = seekBar.progress / 1000.0
+                if (usingExo) {
+                    pushState(sec, exoPlayer?.playWhenReady == true)
+                    applyingRemote = true
+                    exoPlayer?.seekTo(seekBar.progress.toLong())
+                    playerContainer.postDelayed({ applyingRemote = false }, 400)
+                } else if (youtubeMode) {
+                    val js = "if(window.player&&player.seekTo){window.suppressUntil=Date.now()+1800;player.seekTo($sec,true);}"
+                    playerWebView.evaluateJavascript(js, null)
+                    pushState(sec, playPauseBtn.text != "Play")
+                }
+                scheduleHideControls()
+            }
+        })
+    }
+
+    private val progressTick = object : Runnable {
+        override fun run() {
+            if (!userSeeking && loadedUrl != null) refreshProgress()
+            playerContainer.postDelayed(this, 500)
+        }
+    }
+
+    private fun refreshProgress() {
+        if (userSeeking) return
+        if (usingExo) {
+            bindTimes(exoPlayer?.currentPosition ?: 0L, exoPlayer?.duration ?: 0L, exoPlayer?.isPlaying == true)
+            return
+        }
+        if (!youtubeMode) return
+        playerWebView.evaluateJavascript(
+            "(function(){if(!window.player||!player.getCurrentTime||!player.getDuration)return '';" +
+                "var st=player.getPlayerState?player.getPlayerState():-1;" +
+                "return player.getCurrentTime()+','+player.getDuration()+','+(st===1?'1':'0');})()"
+        ) { raw ->
+            if (userSeeking) return@evaluateJavascript
+            val parts = raw?.trim()?.trim('"')?.split(',') ?: return@evaluateJavascript
+            val pos = parts.getOrNull(0)?.toDoubleOrNull() ?: return@evaluateJavascript
+            val dur = parts.getOrNull(1)?.toDoubleOrNull() ?: 0.0
+            bindTimes((pos * 1000).toLong(), (dur * 1000).toLong(), parts.getOrNull(2) == "1")
+        }
+    }
+
+    private fun bindTimes(positionMs: Long, durationMs: Long, playing: Boolean) {
+        if (durationMs > 0) {
+            val max = durationMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt().coerceAtLeast(1)
+            if (playerSeek.max != max) playerSeek.max = max
+            playerSeek.progress = positionMs.coerceIn(0L, max.toLong()).toInt()
+            durationText.text = formatTime(durationMs)
+        }
+        positionText.text = formatTime(positionMs.coerceAtLeast(0L))
+        playPauseBtn.text = if (playing) "Pause" else "Play"
+    }
+
+    private fun formatTime(ms: Long): String {
+        val total = (ms / 1000).coerceAtLeast(0)
+        val h = total / 3600
+        val m = (total % 3600) / 60
+        val s = total % 60
+        return if (h > 0) String.format("%d:%02d:%02d", h, m, s) else String.format("%d:%02d", m, s)
+    }
+
+    private fun togglePlayerControls() {
+        if (controlsVisible) hidePlayerControls() else showPlayerControls()
+    }
+
+    private fun showPlayerControls() {
+        if (loadedUrl == null) return
+        controlsVisible = true
+        playerControls.visibility = View.VISIBLE
+        playerControls.bringToFront()
+        refreshProgress()
+        scheduleHideControls()
+    }
+
+    private fun hidePlayerControls() {
+        controlsVisible = false
+        if (::playerControls.isInitialized) {
+            playerControls.removeCallbacks(hideControls)
+            playerControls.visibility = View.GONE
+        }
+    }
+
+    private fun scheduleHideControls() {
+        playerControls.removeCallbacks(hideControls)
+        val playing = if (usingExo) exoPlayer?.isPlaying == true else playPauseBtn.text == "Pause"
+        if (playing) playerControls.postDelayed(hideControls, 3000)
+    }
+
+    private fun onPlayPauseClicked() {
+        if (loadedUrl == null) return
+        if (usingExo) {
+            val playingNow = exoPlayer?.isPlaying == true
+            val pos = (exoPlayer?.currentPosition ?: 0L) / 1000.0
+            exoPlayer?.playWhenReady = !playingNow
+            pushState(pos, !playingNow)
+            playPauseBtn.text = if (playingNow) "Play" else "Pause"
+        } else if (youtubeMode) {
+            playerWebView.evaluateJavascript(
+                "(function(){if(!window.player||!player.getPlayerState)return '';" +
+                    "var st=player.getPlayerState();var t=player.getCurrentTime();" +
+                    "window.suppressUntil=Date.now()+1800;" +
+                    "if(st===1){player.pauseVideo();return t+',0';}player.playVideo();return t+',1';})()"
+            ) { raw ->
+                val parts = raw?.trim()?.trim('"')?.split(',') ?: return@evaluateJavascript
+                val t = parts.getOrNull(0)?.toDoubleOrNull() ?: return@evaluateJavascript
+                val playing = parts.getOrNull(1) == "1"
+                pushState(t, playing)
+                playPauseBtn.text = if (playing) "Pause" else "Play"
+            }
+        }
+        scheduleHideControls()
     }
 
     private fun shareRoom() {
@@ -720,7 +905,8 @@ class RoomActivity : AppCompatActivity() {
     }
 
     private fun leaveRoom() {
-        if (fullscreen) toggleFullscreen()
+        holdChrome = false
+        setWatchFullscreen(false)
         stopListening()
         currentRoomCode = null
         loadedUrl = null
@@ -865,7 +1051,11 @@ class RoomActivity : AppCompatActivity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     override fun onDestroy() {
-        playerContainer.removeCallbacks(heartbeat)
+        if (::playerContainer.isInitialized) {
+            playerContainer.removeCallbacks(heartbeat)
+            playerContainer.removeCallbacks(progressTick)
+        }
+        if (::playerControls.isInitialized) playerControls.removeCallbacks(hideControls)
         stopListening()
         exoPlayer?.release()
         exoPlayer = null
