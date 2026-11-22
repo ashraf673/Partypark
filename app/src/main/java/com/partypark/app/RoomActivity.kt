@@ -30,6 +30,8 @@ import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MergingMediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -65,6 +67,9 @@ class RoomActivity : AppCompatActivity() {
     private lateinit var positionText: TextView
     private lateinit var durationText: TextView
     private lateinit var playerSeek: SeekBar
+    private lateinit var streamExtractor: StreamExtractor
+
+    private var pendingYoutubeId: String? = null
 
     private var exoPlayer: ExoPlayer? = null
     private var playerView: PlayerView? = null
@@ -130,6 +135,7 @@ class RoomActivity : AppCompatActivity() {
         playerWebView = findViewById(R.id.player_webview)
         playerPlaceholder = findViewById(R.id.player_placeholder)
         playerContainer = findViewById(R.id.player_container)
+        streamExtractor = StreamExtractor(playerContainer)
         seekHint = findViewById(R.id.seek_hint)
         gestureLayer = findViewById(R.id.gesture_layer)
         fullscreenBtn = findViewById(R.id.fullscreen_btn)
@@ -257,10 +263,19 @@ class RoomActivity : AppCompatActivity() {
                 if (playbackState == Player.STATE_READY) {
                     driveFallbackId = null
                     driveRetried = false
+                    pendingYoutubeId = null
+                    acceptLocalEvents = true
+                    playerPlaceholder.visibility = View.GONE
                 }
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                val yt = pendingYoutubeId
+                if (yt != null) {
+                    pendingYoutubeId = null
+                    playYoutubeEmbed(yt, (exoPlayer?.currentPosition ?: 0L) / 1000.0, true)
+                    return
+                }
                 val id = driveFallbackId ?: return
                 if (!driveRetried) {
                     driveRetried = true
@@ -411,7 +426,7 @@ class RoomActivity : AppCompatActivity() {
             } else 0.0
             acceptLocalEvents = false
             loadVideo(url, position + elapsed, playing)
-            playerContainer.postDelayed({ acceptLocalEvents = true }, 1800)
+            playerContainer.postDelayed({ acceptLocalEvents = true }, 12000)
             return
         }
 
@@ -572,7 +587,7 @@ class RoomActivity : AppCompatActivity() {
             "by" to myDeviceId()
         ))
         loadVideo(url, 0.0, true)
-        playerContainer.postDelayed({ acceptLocalEvents = true }, 1800)
+        playerContainer.postDelayed({ acceptLocalEvents = true }, 12000)
     }
 
     private fun loadVideo(url: String, startSec: Double, playing: Boolean) {
@@ -597,9 +612,15 @@ class RoomActivity : AppCompatActivity() {
         driveFallbackId = id
         driveRetried = false
         driveResourceKey = resourceKeyFrom(loadedUrl)
-        val key = driveResourceKey?.let { "&resourcekey=$it" } ?: ""
-        val direct = "https://drive.usercontent.google.com/download?id=$id&export=download&confirm=t$key"
-        playWithExoPlayer(direct, startSec, playing)
+        pendingYoutubeId = null
+        playerPlaceholder.visibility = View.VISIBLE
+        playerPlaceholder.text = "Loading video…"
+        streamExtractor.extractDrive(id) { direct ->
+            if (loadedUrl == null || driveId(loadedUrl!!) != id) return@extractDrive
+            val key = driveResourceKey?.let { "&resourcekey=$it" } ?: ""
+            val download = "https://drive.usercontent.google.com/download?id=$id&export=download&confirm=t$key"
+            playWithExoPlayer(direct ?: download, startSec, playing, "https://drive.google.com/")
+        }
     }
 
     private fun showWeb() {
@@ -609,21 +630,65 @@ class RoomActivity : AppCompatActivity() {
         playerWebView.visibility = View.VISIBLE
     }
 
-    private fun playWithExoPlayer(url: String, startSec: Double, playing: Boolean) {
+    private fun playWithExoPlayer(url: String, startSec: Double, playing: Boolean, referer: String? = null) {
+        playExtracted(url, null, startSec, playing, referer)
+    }
+
+    private fun playExtracted(
+        videoUrl: String,
+        audioUrl: String?,
+        startSec: Double,
+        playing: Boolean,
+        referer: String?
+    ) {
         usingExo = true
         youtubeMode = false
         playerWebView.visibility = View.GONE
         playerWebView.loadUrl("about:blank")
         playerView?.visibility = View.VISIBLE
         val startMs = (startSec * 1000).toLong().coerceAtLeast(0L)
-        exoPlayer?.setMediaItem(MediaItem.fromUri(Uri.parse(url)), startMs)
+        val http = DefaultHttpDataSource.Factory()
+            .setUserAgent(StreamExtractor.UA)
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(20000)
+            .setReadTimeoutMs(20000)
+        if (referer != null) {
+            http.setDefaultRequestProperties(mapOf("Referer" to referer, "Origin" to referer.trimEnd('/')))
+        }
+        val factory = ProgressiveMediaSource.Factory(http)
+        val video = factory.createMediaSource(MediaItem.fromUri(videoUrl))
+        val source = if (audioUrl == null) {
+            video
+        } else {
+            MergingMediaSource(video, factory.createMediaSource(MediaItem.fromUri(audioUrl)))
+        }
+        exoPlayer?.setMediaSource(source, startMs)
         exoPlayer?.prepare()
         exoPlayer?.playWhenReady = playing
     }
 
     private fun playYoutube(id: String, startSec: Double, playing: Boolean) {
+        pendingYoutubeId = id
+        youtubeMode = false
+        usingExo = true
+        playerPlaceholder.visibility = View.VISIBLE
+        playerPlaceholder.text = "Loading video…"
+        playerWebView.visibility = View.GONE
+        streamExtractor.extractYoutube(id) { video, audio ->
+            if (loadedUrl == null || youtubeId(loadedUrl!!) != id) return@extractYoutube
+            if (video == null) {
+                playYoutubeEmbed(id, startSec, playing)
+            } else {
+                playExtracted(video, audio, startSec, playing, "https://www.youtube.com/")
+            }
+        }
+    }
+
+    private fun playYoutubeEmbed(id: String, startSec: Double, playing: Boolean) {
+        pendingYoutubeId = null
         showWeb()
         youtubeMode = true
+        playerPlaceholder.visibility = View.GONE
         val start = startSec.toInt().coerceAtLeast(0)
         val autoplay = if (playing) 1 else 0
         val html = """
@@ -907,6 +972,8 @@ class RoomActivity : AppCompatActivity() {
     private fun leaveRoom() {
         holdChrome = false
         setWatchFullscreen(false)
+        streamExtractor.cancel()
+        pendingYoutubeId = null
         stopListening()
         currentRoomCode = null
         loadedUrl = null
@@ -915,6 +982,7 @@ class RoomActivity : AppCompatActivity() {
         exoPlayer?.stop()
         playerWebView.loadUrl("about:blank")
         playerPlaceholder.visibility = View.VISIBLE
+        playerPlaceholder.text = "No media loaded"
         playerView?.visibility = View.GONE
         playerWebView.visibility = View.VISIBLE
         roomLayout.visibility = View.GONE
@@ -1056,6 +1124,7 @@ class RoomActivity : AppCompatActivity() {
             playerContainer.removeCallbacks(progressTick)
         }
         if (::playerControls.isInitialized) playerControls.removeCallbacks(hideControls)
+        if (::streamExtractor.isInitialized) streamExtractor.cancel()
         stopListening()
         exoPlayer?.release()
         exoPlayer = null
