@@ -17,6 +17,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
@@ -80,10 +81,15 @@ class RoomActivity : AppCompatActivity() {
     private var loadedUrl: String? = null
     private var usingExo = false
     private val videoQueue = mutableListOf<String>()
+    private val playHistory = mutableListOf<String>()
+    private val titles = HashMap<String, String>()
     private var captionsOn = false
     private var playbackSpeed = 1f
     private var inBackground = false
     private var backgroundPlay = false
+    private var suppressSync = false
+    private var pausedForReturn = false
+    private lateinit var bgToggle: TextView
     private lateinit var queueText: TextView
     private lateinit var ytPlayCover: View
     private var youtubeMode = false
@@ -101,6 +107,7 @@ class RoomActivity : AppCompatActivity() {
     private var playerListener: ValueEventListener? = null
     private var messageListener: ChildEventListener? = null
     private var queueListener: ValueEventListener? = null
+    private var historyListener: ValueEventListener? = null
     private var listeningCode: String? = null
 
     private val messages = mutableListOf<ChatMessage>()
@@ -178,10 +185,33 @@ class RoomActivity : AppCompatActivity() {
 
         findViewById<MaterialButton>(R.id.create_room_btn).setOnClickListener { showCreateDialog() }
         findViewById<MaterialButton>(R.id.join_room_btn).setOnClickListener { showJoinDialog() }
-        findViewById<TextView>(R.id.room_menu_btn).setOnClickListener { showRoomMenu(it) }
-        findViewById<MaterialButton>(R.id.load_btn).setOnClickListener { showLoadDialog() }
-        findViewById<MaterialButton>(R.id.add_btn).setOnClickListener { showAddDialog() }
-        findViewById<TextView>(R.id.player_settings).setOnClickListener { showPlayerSettings() }
+        findViewById<ImageView>(R.id.room_menu_btn).setOnClickListener { showRoomMenu(it) }
+        findViewById<MaterialButton>(R.id.load_btn).setOnClickListener { showMediaSources(replace = true) }
+        findViewById<MaterialButton>(R.id.add_btn).setOnClickListener { showMediaSources(replace = false) }
+        findViewById<ImageView>(R.id.player_settings).setOnClickListener { showPlayerSettings() }
+        findViewById<ImageView>(R.id.prev_btn).setOnClickListener { playPrevious() }
+        findViewById<ImageView>(R.id.next_btn).setOnClickListener { playNextFromQueue(fromUser = true) }
+        bgToggle = findViewById(R.id.bg_toggle)
+        refreshBgButton()
+        bgToggle.setOnClickListener {
+            val on = !bgEnabled()
+            prefs.edit().putBoolean("bg_play_enabled", on).apply()
+            refreshBgButton()
+            if (!on) {
+                backgroundPlay = false
+                PlaybackService.stop(this)
+            }
+        }
+        PlaybackService.onAction = { action ->
+            runOnUiThread {
+                when (action) {
+                    PlaybackService.ACTION_PREV -> playPrevious()
+                    PlaybackService.ACTION_NEXT -> playNextFromQueue(fromUser = true)
+                    PlaybackService.ACTION_TOGGLE -> onPlayPauseClicked()
+                }
+                refreshNotification()
+            }
+        }
         findViewById<MaterialButton>(R.id.send_btn).setOnClickListener { sendMessage() }
 
         refreshRooms()
@@ -202,15 +232,29 @@ class RoomActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
-        backgroundPlay = mediaIsPlaying()
-        if (backgroundPlay) {
+        val wasPlaying = mediaIsPlaying()
+        if (bgEnabled() && wasPlaying) {
+            backgroundPlay = true
             playerWebView.keepPlayingInBackground = true
             playerWebView.onResume()
             if (usingExo) {
                 exoPlayer?.setForegroundMode(true)
                 exoPlayer?.playWhenReady = true
             }
-            PlaybackService.start(this)
+            PlaybackService.start(this, displayTitle(), true)
+        } else {
+            backgroundPlay = false
+            if (wasPlaying) {
+                pausedForReturn = true
+                suppressSync = true
+                if (usingExo) exoPlayer?.playWhenReady = false
+                else playerWebView.evaluateJavascript(
+                    "if(window.player&&player.pauseVideo){window.suppressUntil=Date.now()+4000;player.pauseVideo();}",
+                    null
+                )
+                playerContainer.postDelayed({ suppressSync = false }, 1500)
+            }
+            PlaybackService.stop(this)
         }
         super.onPause()
     }
@@ -218,12 +262,25 @@ class RoomActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         inBackground = true
+        if (backgroundPlay) refreshNotification()
     }
 
     override fun onStart() {
         inBackground = false
         if (::playerWebView.isInitialized) playerWebView.keepPlayingInBackground = false
         exoPlayer?.setForegroundMode(false)
+        if (pausedForReturn) {
+            pausedForReturn = false
+            suppressSync = true
+            if (usingExo) exoPlayer?.playWhenReady = true
+            else playerWebView.evaluateJavascript(
+                "if(window.player&&player.playVideo){window.suppressUntil=Date.now()+2500;player.playVideo();}",
+                null
+            )
+            if (::playerContainer.isInitialized) {
+                playerContainer.postDelayed({ suppressSync = false }, 1500)
+            }
+        }
         PlaybackService.stop(this)
         super.onStart()
     }
@@ -296,19 +353,19 @@ class RoomActivity : AppCompatActivity() {
         exoPlayer?.setWakeMode(C.WAKE_MODE_NETWORK)
         exoPlayer?.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (suppressSync) return
                 if (applyingRemote) {
                     if (inBackground) syncBackgroundService(isPlaying)
                     return
                 }
-                if (inBackground && backgroundPlay && usingExo && exoPlayer?.playWhenReady == false) {
-                    exoPlayer?.playWhenReady = true
+                if (inBackground && backgroundPlay && usingExo && exoPlayer?.playWhenReady == false && bgEnabled()) {
                     return
                 }
-                if (inBackground && backgroundPlay && !isPlaying) return
                 if (!acceptLocalEvents || !usingExo) return
                 val pos = (exoPlayer?.currentPosition ?: 0L) / 1000.0
                 if (isPlaying && pos < 1.0) return
                 pushState(pos, isPlaying)
+                if (inBackground) refreshNotification()
             }
 
             override fun onPositionDiscontinuity(
@@ -387,15 +444,29 @@ class RoomActivity : AppCompatActivity() {
     }
 
     private fun syncBackgroundService(playing: Boolean) {
-        if (!inBackground) return
-        if (playing) {
-            backgroundPlay = true
-            PlaybackService.start(this)
-        } else {
-            backgroundPlay = false
-            playerWebView.keepPlayingInBackground = false
-            PlaybackService.stop(this)
-        }
+        if (!inBackground || !bgEnabled()) return
+        backgroundPlay = true
+        PlaybackService.start(this, displayTitle(), playing)
+    }
+
+    private fun bgEnabled(): Boolean = prefs.getBoolean("bg_play_enabled", false)
+
+    private fun refreshBgButton() {
+        if (!::bgToggle.isInitialized) return
+        val on = bgEnabled()
+        bgToggle.text = if (on) "BG On" else "BG Off"
+        bgToggle.setTextColor(if (on) 0xFF4ADE80.toInt() else 0xFF94A3B8.toInt())
+    }
+
+    private fun displayTitle(): String {
+        val url = loadedUrl ?: return "Partypark"
+        return titles[url] ?: "Now playing"
+    }
+
+    private fun refreshNotification() {
+        if (!inBackground || !backgroundPlay || !bgEnabled()) return
+        val playing = if (usingExo) exoPlayer?.playWhenReady == true else playPauseBtn.text == "Pause"
+        PlaybackService.start(this, displayTitle(), playing)
     }
 
     private fun showCreateDialog() {
@@ -515,6 +586,21 @@ class RoomActivity : AppCompatActivity() {
             override fun onCancelled(error: DatabaseError) {}
         }
         db.child("rooms").child(code).child("queue").addValueEventListener(queueListener!!)
+
+        historyListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val remote = mutableListOf<String>()
+                for (child in snapshot.children) {
+                    child.getValue(String::class.java)?.let { remote.add(it) }
+                }
+                if (remote != playHistory) {
+                    playHistory.clear()
+                    playHistory.addAll(remote)
+                }
+            }
+            override fun onCancelled(error: DatabaseError) {}
+        }
+        db.child("rooms").child(code).child("history").addValueEventListener(historyListener!!)
     }
 
     private fun onPlayerSnapshot(snapshot: DataSnapshot) {
@@ -681,32 +767,114 @@ class RoomActivity : AppCompatActivity() {
         popup.show()
     }
 
-    private fun showLoadDialog() {
+    private fun showMediaSources(replace: Boolean) {
+        val wrap = LinearLayout(this)
+        wrap.orientation = LinearLayout.VERTICAL
+        wrap.setPadding(dp(20), dp(8), dp(20), 0)
         val input = EditText(this)
-        input.hint = "YouTube, Drive, or a direct video link"
+        input.hint = "Paste a video link"
+        val paste = MaterialButton(this)
+        paste.text = if (replace) "Use this link" else "Add this link"
+        val youtube = MaterialButton(this)
+        youtube.text = "YouTube"
+        val playlist = MaterialButton(this)
+        playlist.text = "Playlist"
+        wrap.addView(input)
+        wrap.addView(paste)
+        wrap.addView(youtube)
+        wrap.addView(playlist)
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(if (replace) "Load Video" else "Add Video")
+            .setView(wrap)
+            .setNegativeButton("Cancel", null)
+            .create()
+        paste.setOnClickListener {
+            val url = input.text.toString().trim()
+            if (url.isEmpty()) return@setOnClickListener
+            dialog.dismiss()
+            if (replace) loadAndSync(url) else addToQueue(url)
+        }
+        youtube.setOnClickListener {
+            dialog.dismiss()
+            openYoutubePicker()
+        }
+        playlist.setOnClickListener {
+            dialog.dismiss()
+            pickFromPlaylists()
+        }
+        dialog.show()
+    }
+
+    private fun openYoutubePicker() {
+        PickBus.onRoomPick = { url, title, top ->
+            runOnUiThread {
+                titles[url] = title
+                if (top) videoQueue.add(0, url) else videoQueue.add(url)
+                updateQueueText()
+                syncQueue()
+                Toast.makeText(this, "Queue: ${videoQueue.size}", Toast.LENGTH_SHORT).show()
+                if (loadedUrl.isNullOrBlank()) playNextFromQueue()
+            }
+        }
+        startActivity(Intent(this, YoutubePickActivity::class.java)
+            .putExtra(YoutubePickActivity.EXTRA_MODE, YoutubePickActivity.MODE_ROOM))
+    }
+
+    private fun pickFromPlaylists() {
+        val lists = PlaylistStore.load(this)
+        if (lists.isEmpty()) {
+            Toast.makeText(this, "No playlists yet. Create one from Home.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val names = lists.map { it.name }.toTypedArray()
         AlertDialog.Builder(this)
-            .setTitle("Load Video")
-            .setView(input)
-            .setPositiveButton("Load") { _, _ ->
-                val url = input.text.toString().trim()
-                if (url.isNotEmpty()) loadAndSync(url)
+            .setTitle("Playlist")
+            .setItems(names) { _, which -> askPlaylistMode(lists[which]) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun askPlaylistMode(playlist: UserPlaylist) {
+        if (playlist.videos.isEmpty()) {
+            Toast.makeText(this, "This playlist is empty", Toast.LENGTH_SHORT).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle(playlist.name)
+            .setItems(arrayOf("Add whole playlist", "Choose videos")) { _, which ->
+                if (which == 0) {
+                    playlist.videos.forEach { titles[it.url] = it.title }
+                    addMany(playlist.videos.map { it.url })
+                } else {
+                    chooseVideos(playlist)
+                }
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun showAddDialog() {
-        val input = EditText(this)
-        input.hint = "YouTube, Drive, or a direct video link"
+    private fun chooseVideos(playlist: UserPlaylist) {
+        val labels = playlist.videos.map { it.title.ifBlank { it.url } }.toTypedArray()
+        val checked = BooleanArray(labels.size)
         AlertDialog.Builder(this)
-            .setTitle("Add to queue")
-            .setView(input)
-            .setPositiveButton("Add") { _, _ ->
-                val url = input.text.toString().trim()
-                if (url.isNotEmpty()) addToQueue(url)
+            .setTitle(playlist.name)
+            .setMultiChoiceItems(labels, checked) { _, which, on -> checked[which] = on }
+            .setPositiveButton("Done") { _, _ ->
+                val picked = playlist.videos.filterIndexed { index, _ -> checked[index] }
+                picked.forEach { titles[it.url] = it.title }
+                addMany(picked.map { it.url })
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun addMany(urls: List<String>) {
+        if (urls.isEmpty()) return
+        videoQueue.addAll(urls)
+        updateQueueText()
+        syncQueue()
+        Toast.makeText(this, "Added ${urls.size}", Toast.LENGTH_SHORT).show()
+        if (loadedUrl.isNullOrBlank()) playNextFromQueue()
     }
 
     private fun addToQueue(url: String) {
@@ -717,12 +885,39 @@ class RoomActivity : AppCompatActivity() {
         if (loadedUrl.isNullOrBlank()) playNextFromQueue()
     }
 
-    private fun playNextFromQueue() {
-        if (videoQueue.isEmpty()) return
+    private fun playNextFromQueue(fromUser: Boolean = false) {
+        if (videoQueue.isEmpty()) {
+            if (fromUser) Toast.makeText(this, "No next video", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val current = loadedUrl
+        if (!current.isNullOrBlank()) playHistory.add(current)
         val next = videoQueue.removeAt(0)
         updateQueueText()
         syncQueue()
+        syncHistory()
         loadAndSync(next)
+        refreshNotification()
+    }
+
+    private fun playPrevious() {
+        if (playHistory.isEmpty()) {
+            Toast.makeText(this, "No previous video", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val previous = playHistory.removeAt(playHistory.lastIndex)
+        val current = loadedUrl
+        if (!current.isNullOrBlank()) videoQueue.add(0, current)
+        updateQueueText()
+        syncQueue()
+        syncHistory()
+        loadAndSync(previous)
+        refreshNotification()
+    }
+
+    private fun syncHistory() {
+        val code = currentRoomCode ?: return
+        db.child("rooms").child(code).child("history").setValue(playHistory.toList())
     }
 
     private fun updateQueueText() {
@@ -740,7 +935,7 @@ class RoomActivity : AppCompatActivity() {
         val items = arrayOf(
             "Speed: ${playbackSpeed}x",
             if (captionsOn) "Captions: On" else "Captions: Off",
-            "Quality: Auto"
+            "Quality: ${qualityLabel()}"
         )
         AlertDialog.Builder(this)
             .setTitle("Player settings")
@@ -758,10 +953,31 @@ class RoomActivity : AppCompatActivity() {
                         applyCaptions()
                         Toast.makeText(this, if (captionsOn) "Captions on" else "Captions off", Toast.LENGTH_SHORT).show()
                     }
-                    2 -> Toast.makeText(this, "Quality follows the source. Auto is used.", Toast.LENGTH_SHORT).show()
+                    2 -> AlertDialog.Builder(this)
+                        .setTitle("Quality")
+                        .setItems(arrayOf("144p", "High", "Auto")) { _, i ->
+                            val value = arrayOf("144", "high", "auto")[i]
+                            prefs.edit().putString("playback_quality", value).apply()
+                            reloadCurrentQuality()
+                        }
+                        .show()
                 }
             }
             .show()
+    }
+
+    private fun qualityLabel(): String = when (prefs.getString("playback_quality", "auto")) {
+        "144" -> "144p"
+        "high" -> "High"
+        else -> "Auto"
+    }
+
+    private fun reloadCurrentQuality() {
+        val url = loadedUrl ?: return
+        val id = youtubeId(url) ?: return
+        val pos = if (usingExo) (exoPlayer?.currentPosition ?: 0L) / 1000.0 else 0.0
+        val playing = if (usingExo) exoPlayer?.playWhenReady == true else playPauseBtn.text == "Pause"
+        playYoutube(id, pos, playing)
     }
 
     private fun applySpeed() {
@@ -889,7 +1105,7 @@ class RoomActivity : AppCompatActivity() {
         playerPlaceholder.visibility = View.VISIBLE
         playerPlaceholder.text = "Loading video…"
         playerWebView.visibility = View.GONE
-        streamExtractor.extractYoutube(id) { video, audio ->
+        streamExtractor.extractYoutube(id, prefs.getString("playback_quality", "auto") ?: "auto") { video, audio ->
             if (loadedUrl == null || youtubeId(loadedUrl!!) != id) return@extractYoutube
             if (video == null) {
                 playYoutubeEmbed(id, startSec, playing)
@@ -906,21 +1122,35 @@ class RoomActivity : AppCompatActivity() {
         playerPlaceholder.visibility = View.GONE
         val start = startSec.toInt().coerceAtLeast(0)
         val autoplay = if (playing) 1 else 0
+        val quality = when (prefs.getString("playback_quality", "auto")) {
+            "144" -> "tiny"
+            "high" -> "hd1080"
+            else -> "default"
+        }
         val html = """
             <!DOCTYPE html>
             <html>
             <head>
               <meta name="referrer" content="strict-origin-when-cross-origin">
               <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-              <style>html,body,#player{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden}</style>
+              <style>
+                html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden}
+                #wrap{position:relative;width:100%;height:100%;background:#000}
+                #player{width:100%;height:100%}
+                #cover{position:absolute;left:50%;top:46%;width:92px;height:92px;margin-left:-46px;background:#000;border-radius:46px;z-index:5;pointer-events:none}
+              </style>
             </head>
             <body>
-              <div id="player"></div>
+              <div id="wrap">
+                <div id="player"></div>
+                <div id="cover"></div>
+              </div>
               <script src="https://www.youtube.com/iframe_api"></script>
               <script>
                 var player;
                 window.suppressUntil = 0;
                 var lastT = 0;
+                function cover(show){var c=document.getElementById('cover'); if(c) c.style.display=show?'block':'none';}
                 function onYouTubeIframeAPIReady() {
                   player = new YT.Player('player', {
                     width: '100%',
@@ -939,10 +1169,17 @@ class RoomActivity : AppCompatActivity() {
                       start: $start,
                       origin: '$APP_ORIGIN'
                     },
-                    events: { onStateChange: onPlayerStateChange }
+                    events: {
+                      onReady: function(e){
+                        try { e.target.setPlaybackQuality('$quality'); } catch (err) {}
+                        if ($autoplay === 1) e.target.playVideo();
+                      },
+                      onStateChange: onPlayerStateChange
+                    }
                   });
                 }
                 function onPlayerStateChange(e) {
+                  cover(e.data !== 1);
                   if (Date.now() < window.suppressUntil || !player || !player.getCurrentTime) return;
                   var t = player.getCurrentTime();
                   if (e.data === YT.PlayerState.PLAYING) Android.onPlayback(t, true);
@@ -1178,6 +1415,7 @@ class RoomActivity : AppCompatActivity() {
             }
         }
         scheduleHideControls()
+        refreshNotification()
     }
 
     private fun shareRoom() {
@@ -1225,9 +1463,11 @@ class RoomActivity : AppCompatActivity() {
         playerListener?.let { db.child("rooms").child(code).child("player").removeEventListener(it) }
         messageListener?.let { db.child("rooms").child(code).child("messages").removeEventListener(it) }
         queueListener?.let { db.child("rooms").child(code).child("queue").removeEventListener(it) }
+        historyListener?.let { db.child("rooms").child(code).child("history").removeEventListener(it) }
         playerListener = null
         messageListener = null
         queueListener = null
+        historyListener = null
         listeningCode = null
     }
 
@@ -1345,6 +1585,8 @@ class RoomActivity : AppCompatActivity() {
         if (::playerControls.isInitialized) playerControls.removeCallbacks(hideControls)
         if (::streamExtractor.isInitialized) streamExtractor.cancel()
         backgroundPlay = false
+        PlaybackService.onAction = null
+        PickBus.onRoomPick = null
         PlaybackService.stop(this)
         stopListening()
         exoPlayer?.release()
@@ -1356,6 +1598,7 @@ class RoomActivity : AppCompatActivity() {
         @JavascriptInterface
         fun onPlayback(position: Double, playing: Boolean) {
             runOnUiThread {
+                if (suppressSync) return@runOnUiThread
                 ytPlayCover.visibility = if (youtubeMode && !playing) View.VISIBLE else View.GONE
                 if (applyingRemote || !youtubeMode) return@runOnUiThread
                 if (!acceptLocalEvents && playing && position < 1.5) return@runOnUiThread

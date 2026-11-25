@@ -52,6 +52,22 @@
             android:exported="false"
             android:theme="@style/Theme.Partypark.NoActionBar" />
 
+        <activity
+            android:name=".PlaylistActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Partypark.NoActionBar" />
+
+        <activity
+            android:name=".PlaylistDetailActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Partypark.NoActionBar" />
+
+        <activity
+            android:name=".YoutubePickActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"
+            android:theme="@style/Theme.Partypark.NoActionBar" />
+
         <service
             android:name=".StreamService"
             android:enabled="true"

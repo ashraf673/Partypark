@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -90,9 +91,12 @@ class MainActivity : AppCompatActivity() {
             }
             override fun afterTextChanged(s: android.text.Editable?) {}
         })
-        findViewById<TextView>(R.id.search_btn).setOnClickListener {
+        findViewById<ImageView>(R.id.search_btn).setOnClickListener {
             val q = search.text.toString().trim()
             if (q.length >= 4) joinRoom(q.uppercase()) else filterRooms(q)
+        }
+        findViewById<TextView>(R.id.playlist_btn).setOnClickListener {
+            startActivity(Intent(this, PlaylistActivity::class.java))
         }
         findViewById<MaterialButton>(R.id.create_room_btn).setOnClickListener { showCreateDialog() }
         findViewById<MaterialButton>(R.id.join_room_btn).setOnClickListener { showJoinDialog() }

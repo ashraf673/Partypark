@@ -29,10 +29,14 @@ class StreamExtractor(private val host: FrameLayout) {
         destroyWeb()
     }
 
-    fun extractYoutube(videoId: String, onResult: (videoUrl: String?, audioUrl: String?) -> Unit) {
+    fun extractYoutube(
+        videoId: String,
+        quality: String,
+        onResult: (videoUrl: String?, audioUrl: String?) -> Unit
+    ) {
         val gen = ++generation
         destroyWeb()
-        val progressive = arrayOfNulls<String>(1)
+        val progressive = HashMap<Int, String>()
         val videos = HashMap<Int, String>()
         val audios = HashMap<Int, String>()
         val done = AtomicBoolean(false)
@@ -40,14 +44,7 @@ class StreamExtractor(private val host: FrameLayout) {
         fun finish() {
             if (!done.compareAndSet(false, true)) return
             if (gen != generation) return
-            val prog = progressive[0]
-            val pair = if (prog != null) {
-                prog to null
-            } else {
-                val video = best(videos, VIDEO_ORDER)
-                val audio = best(audios, AUDIO_ORDER)
-                if (video != null && audio != null) video to audio else null to null
-            }
+            val pair = pickStreams(quality, progressive, videos, audios)
             destroyWeb()
             onResult(pair.first, pair.second)
         }
@@ -58,19 +55,26 @@ class StreamExtractor(private val host: FrameLayout) {
             val itag = itagOf(clean)
             val mime = mimeOf(clean)
             if (itag in PROGRESSIVE) {
-                val prev = progressive[0]
-                if (prev == null || rank(itag) > rank(itagOf(prev))) progressive[0] = clean
-                main.post { finish() }
+                progressive[itag] = clean
+                if (quality != "144" && (quality != "high" || itag == 22)) main.post { finish() }
             } else if (mime.startsWith("video/") && itag > 0) {
                 videos[itag] = clean
             } else if (mime.startsWith("audio/") && itag > 0) {
                 audios[itag] = clean
             }
-            if (videos.isNotEmpty() && audios.isNotEmpty()) main.postDelayed({ finish() }, 1200)
+            val ready144 = quality == "144" && videos.containsKey(160) && audios.isNotEmpty()
+            val readyHigh = quality == "high" && (videos.containsKey(137) || videos.containsKey(136)) && audios.isNotEmpty()
+            val readyAuto = quality == "auto" && videos.isNotEmpty() && audios.isNotEmpty()
+            if (ready144 || readyHigh || readyAuto) main.postDelayed({ finish() }, 900)
         }
-        view.loadUrl("https://www.youtube.com/embed/$videoId?autoplay=1&mute=1&playsinline=1")
+        val vq = when (quality) {
+            "144" -> "tiny"
+            "high" -> "hd1080"
+            else -> "auto"
+        }
+        view.loadUrl("https://www.youtube.com/embed/$videoId?autoplay=1&mute=1&playsinline=1&vq=$vq")
         main.postDelayed({
-            if (gen != generation || progressive[0] != null || videos.isNotEmpty()) return@postDelayed
+            if (gen != generation || progressive.isNotEmpty() || videos.isNotEmpty()) return@postDelayed
             web?.loadUrl("https://m.youtube.com/watch?v=$videoId")
         }, 4000)
         main.postDelayed({ if (gen == generation) finish() }, 10000)
@@ -160,18 +164,40 @@ class StreamExtractor(private val host: FrameLayout) {
         view.destroy()
     }
 
+    private fun pickStreams(
+        quality: String,
+        progressive: Map<Int, String>,
+        videos: Map<Int, String>,
+        audios: Map<Int, String>
+    ): Pair<String?, String?> {
+        fun withAudio(order: List<Int>, audioOrder: List<Int>): Pair<String?, String?>? {
+            val video = best(videos, order) ?: return null
+            val audio = best(audios, audioOrder) ?: return null
+            return video to audio
+        }
+        return when (quality) {
+            "144" -> withAudio(listOf(160, 133, 134), listOf(139, 249, 140, 250))
+                ?: single(progressive[18] ?: progressive.values.firstOrNull())
+            "high" -> single(progressive[22])
+                ?: withAudio(listOf(137, 136, 135), listOf(140, 141, 251))
+                ?: single(progressive.values.firstOrNull())
+            else -> {
+                val prog = listOf(18, 22, 37).firstNotNullOfOrNull { progressive[it] }
+                single(prog) ?: withAudio(VIDEO_ORDER, AUDIO_ORDER) ?: (null to null)
+            }
+        }
+    }
+
+    private fun single(url: String?): Pair<String?, String?>? {
+        if (url == null) return null
+        return url to null
+    }
+
     private fun best(map: Map<Int, String>, order: List<Int>): String? {
         for (itag in order) {
             map[itag]?.let { return it }
         }
         return map.values.firstOrNull()
-    }
-
-    private fun rank(itag: Int): Int = when (itag) {
-        22 -> 3
-        18 -> 2
-        37 -> 1
-        else -> 0
     }
 
     private fun itagOf(url: String): Int {
