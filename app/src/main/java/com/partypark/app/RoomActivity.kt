@@ -20,7 +20,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
-import android.widget.Toast
+import android.widget.PopupMenu
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.media3.common.AudioAttributes
@@ -63,7 +63,6 @@ class RoomActivity : AppCompatActivity() {
     private lateinit var playerContainer: FrameLayout
     private lateinit var seekHint: TextView
     private lateinit var gestureLayer: View
-    private lateinit var fullscreenBtn: MaterialButton
     private lateinit var playerControls: LinearLayout
     private lateinit var playPauseBtn: TextView
     private lateinit var positionText: TextView
@@ -79,8 +78,13 @@ class RoomActivity : AppCompatActivity() {
     private var currentRoomCode: String? = null
     private var loadedUrl: String? = null
     private var usingExo = false
+    private val videoQueue = mutableListOf<String>()
+    private var captionsOn = false
+    private var playbackSpeed = 1f
     private var inBackground = false
     private var backgroundPlay = false
+    private lateinit var queueText: TextView
+    private lateinit var ytPlayCover: View
     private var youtubeMode = false
     private var fullscreen = false
     private var controlsVisible = false
@@ -95,6 +99,7 @@ class RoomActivity : AppCompatActivity() {
 
     private var playerListener: ValueEventListener? = null
     private var messageListener: ChildEventListener? = null
+    private var queueListener: ValueEventListener? = null
     private var listeningCode: String? = null
 
     private val messages = mutableListOf<ChatMessage>()
@@ -142,12 +147,13 @@ class RoomActivity : AppCompatActivity() {
         streamExtractor = StreamExtractor(playerContainer)
         seekHint = findViewById(R.id.seek_hint)
         gestureLayer = findViewById(R.id.gesture_layer)
-        fullscreenBtn = findViewById(R.id.fullscreen_btn)
         playerControls = findViewById(R.id.player_controls)
         playPauseBtn = findViewById(R.id.play_pause_btn)
         positionText = findViewById(R.id.position_text)
         durationText = findViewById(R.id.duration_text)
         playerSeek = findViewById(R.id.player_seek)
+        queueText = findViewById(R.id.queue_text)
+        ytPlayCover = findViewById(R.id.yt_play_cover)
 
         chatAdapter = ChatAdapter(messages)
         chatList.layoutManager = LinearLayoutManager(this)
@@ -171,15 +177,22 @@ class RoomActivity : AppCompatActivity() {
 
         findViewById<MaterialButton>(R.id.create_room_btn).setOnClickListener { showCreateDialog() }
         findViewById<MaterialButton>(R.id.join_room_btn).setOnClickListener { showJoinDialog() }
-        findViewById<MaterialButton>(R.id.share_btn).setOnClickListener { shareRoom() }
-        findViewById<MaterialButton>(R.id.leave_btn).setOnClickListener { leaveRoom() }
+        findViewById<TextView>(R.id.room_menu_btn).setOnClickListener { showRoomMenu(it) }
         findViewById<MaterialButton>(R.id.load_btn).setOnClickListener { showLoadDialog() }
+        findViewById<MaterialButton>(R.id.add_btn).setOnClickListener { showAddDialog() }
+        findViewById<TextView>(R.id.player_settings).setOnClickListener { showPlayerSettings() }
         findViewById<MaterialButton>(R.id.send_btn).setOnClickListener { sendMessage() }
-        fullscreenBtn.setOnClickListener { showRotateHint() }
 
         refreshRooms()
         playerContainer.postDelayed(heartbeat, 4000)
         playerContainer.post(progressTick)
+
+        val openCode = intent.getStringExtra("room_code")
+        if (!openCode.isNullOrBlank()) {
+            lobbyLayout.visibility = View.GONE
+            roomLayout.visibility = View.VISIBLE
+            joinRoom(openCode)
+        }
     }
 
     override fun onResume() {
@@ -315,9 +328,12 @@ class RoomActivity : AppCompatActivity() {
                     acceptLocalEvents = true
                     playerPlaceholder.visibility = View.GONE
                 }
-                if (playbackState == Player.STATE_ENDED && inBackground) {
-                    backgroundPlay = false
-                    PlaybackService.stop(this@RoomActivity)
+                if (playbackState == Player.STATE_ENDED) {
+                    if (inBackground) {
+                        backgroundPlay = false
+                        PlaybackService.stop(this@RoomActivity)
+                    }
+                    playNextFromQueue()
                 }
             }
 
@@ -444,7 +460,7 @@ class RoomActivity : AppCompatActivity() {
     private fun enterRoom(code: String, name: String) {
         saveJoined(code, name)
         currentRoomCode = code
-        roomCodeText.text = "$name  $code"
+        roomCodeText.text = code
         lobbyLayout.visibility = View.GONE
         roomLayout.visibility = View.VISIBLE
         messages.clear()
@@ -482,6 +498,22 @@ class RoomActivity : AppCompatActivity() {
             override fun onCancelled(error: DatabaseError) {}
         }
         db.child("rooms").child(code).child("player").addValueEventListener(playerListener!!)
+
+        queueListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val remote = mutableListOf<String>()
+                for (child in snapshot.children) {
+                    child.getValue(String::class.java)?.let { remote.add(it) }
+                }
+                if (remote != videoQueue) {
+                    videoQueue.clear()
+                    videoQueue.addAll(remote)
+                    updateQueueText()
+                }
+            }
+            override fun onCancelled(error: DatabaseError) {}
+        }
+        db.child("rooms").child(code).child("queue").addValueEventListener(queueListener!!)
     }
 
     private fun onPlayerSnapshot(snapshot: DataSnapshot) {
@@ -632,6 +664,22 @@ class RoomActivity : AppCompatActivity() {
         messageInput.text.clear()
     }
 
+    private fun showRoomMenu(anchor: View) {
+        val popup = PopupMenu(this, anchor)
+        popup.menu.add("Full screen")
+        popup.menu.add("Share")
+        popup.menu.add("Leave")
+        popup.setOnMenuItemClickListener { item ->
+            when (item.title.toString()) {
+                "Full screen" -> showRotateHint()
+                "Share" -> shareRoom()
+                "Leave" -> leaveRoom()
+            }
+            true
+        }
+        popup.show()
+    }
+
     private fun showLoadDialog() {
         val input = EditText(this)
         input.hint = "YouTube, Drive, or a direct video link"
@@ -644,6 +692,98 @@ class RoomActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun showAddDialog() {
+        val input = EditText(this)
+        input.hint = "YouTube, Drive, or a direct video link"
+        AlertDialog.Builder(this)
+            .setTitle("Add to queue")
+            .setView(input)
+            .setPositiveButton("Add") { _, _ ->
+                val url = input.text.toString().trim()
+                if (url.isNotEmpty()) addToQueue(url)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun addToQueue(url: String) {
+        videoQueue.add(url)
+        updateQueueText()
+        syncQueue()
+        Toast.makeText(this, "Added. Queue: ${videoQueue.size}", Toast.LENGTH_SHORT).show()
+        if (loadedUrl.isNullOrBlank()) playNextFromQueue()
+    }
+
+    private fun playNextFromQueue() {
+        if (videoQueue.isEmpty()) return
+        val next = videoQueue.removeAt(0)
+        updateQueueText()
+        syncQueue()
+        loadAndSync(next)
+    }
+
+    private fun updateQueueText() {
+        if (::queueText.isInitialized) queueText.text = "Queue: ${videoQueue.size}"
+    }
+
+    private fun syncQueue() {
+        val code = currentRoomCode ?: return
+        db.child("rooms").child(code).child("queue").setValue(videoQueue.toList())
+    }
+
+    private fun showPlayerSettings() {
+        val speeds = arrayOf("0.5x", "0.75x", "1x", "1.25x", "1.5x", "2x")
+        val speedValues = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+        val items = arrayOf(
+            "Speed: ${playbackSpeed}x",
+            if (captionsOn) "Captions: On" else "Captions: Off",
+            "Quality: Auto"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Player settings")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> AlertDialog.Builder(this)
+                        .setTitle("Playback speed")
+                        .setItems(speeds) { _, i ->
+                            playbackSpeed = speedValues[i]
+                            applySpeed()
+                        }
+                        .show()
+                    1 -> {
+                        captionsOn = !captionsOn
+                        applyCaptions()
+                        Toast.makeText(this, if (captionsOn) "Captions on" else "Captions off", Toast.LENGTH_SHORT).show()
+                    }
+                    2 -> Toast.makeText(this, "Quality follows the source. Auto is used.", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .show()
+    }
+
+    private fun applySpeed() {
+        if (usingExo) {
+            exoPlayer?.setPlaybackSpeed(playbackSpeed)
+        } else if (youtubeMode) {
+            playerWebView.evaluateJavascript(
+                "if(window.player&&player.setPlaybackRate)player.setPlaybackRate($playbackSpeed);",
+                null
+            )
+        }
+    }
+
+    private fun applyCaptions() {
+        if (youtubeMode) {
+            val js = if (captionsOn) {
+                "if(window.player){try{player.loadModule('captions');player.setOption('captions','track',{languageCode:'en'});}catch(e){}}"
+            } else {
+                "if(window.player){try{player.unloadModule('captions');player.setOption('captions','track',{});}catch(e){}}"
+            }
+            playerWebView.evaluateJavascript(js, null)
+        }
+        ytPlayCover.visibility = if (youtubeMode && !captionsOn) View.GONE else ytPlayCover.visibility
     }
 
     private fun loadAndSync(url: String) {
@@ -794,6 +934,7 @@ class RoomActivity : AppCompatActivity() {
                       rel: 0,
                       modestbranding: 1,
                       iv_load_policy: 3,
+                      cc_load_policy: 0,
                       start: $start,
                       origin: '$APP_ORIGIN'
                     },
@@ -805,6 +946,7 @@ class RoomActivity : AppCompatActivity() {
                   var t = player.getCurrentTime();
                   if (e.data === YT.PlayerState.PLAYING) Android.onPlayback(t, true);
                   else if (e.data === YT.PlayerState.PAUSED) Android.onPlayback(t, false);
+                  else if (e.data === YT.PlayerState.ENDED) Android.onEnded();
                 }
                 setInterval(function() {
                   if (Date.now() < window.suppressUntil || !player || !player.getCurrentTime) return;
@@ -871,13 +1013,15 @@ class RoomActivity : AppCompatActivity() {
         if (on == fullscreen) return
         fullscreen = on
         val header = findViewById<View>(R.id.room_header)
-        val loadBtn = findViewById<View>(R.id.load_btn)
+        val buttons = findViewById<View>(R.id.video_buttons)
+        val queue = findViewById<View>(R.id.queue_text)
         val messageBar = findViewById<View>(R.id.message_bar)
         val playerLp = playerContainer.layoutParams as LinearLayout.LayoutParams
         if (on) {
             supportActionBar?.hide()
             header.visibility = View.GONE
-            loadBtn.visibility = View.GONE
+            buttons.visibility = View.GONE
+            queue.visibility = View.GONE
             chatList.visibility = View.GONE
             messageBar.visibility = View.GONE
             playerLp.height = 0
@@ -894,7 +1038,8 @@ class RoomActivity : AppCompatActivity() {
         } else {
             supportActionBar?.show()
             header.visibility = View.VISIBLE
-            loadBtn.visibility = View.VISIBLE
+            buttons.visibility = View.VISIBLE
+            queue.visibility = View.VISIBLE
             chatList.visibility = View.VISIBLE
             messageBar.visibility = View.VISIBLE
             playerLp.height = dp(220)
@@ -1058,13 +1203,7 @@ class RoomActivity : AppCompatActivity() {
         PlaybackService.stop(this)
         playerWebView.keepPlayingInBackground = false
         playerWebView.loadUrl("about:blank")
-        playerPlaceholder.visibility = View.VISIBLE
-        playerPlaceholder.text = "No media loaded"
-        playerView?.visibility = View.GONE
-        playerWebView.visibility = View.VISIBLE
-        roomLayout.visibility = View.GONE
-        lobbyLayout.visibility = View.VISIBLE
-        refreshRooms()
+        finish()
     }
 
     private fun confirmDelete(entry: RoomEntry) {
@@ -1084,8 +1223,10 @@ class RoomActivity : AppCompatActivity() {
         val code = listeningCode ?: return
         playerListener?.let { db.child("rooms").child(code).child("player").removeEventListener(it) }
         messageListener?.let { db.child("rooms").child(code).child("messages").removeEventListener(it) }
+        queueListener?.let { db.child("rooms").child(code).child("queue").removeEventListener(it) }
         playerListener = null
         messageListener = null
+        queueListener = null
         listeningCode = null
     }
 
@@ -1214,10 +1355,16 @@ class RoomActivity : AppCompatActivity() {
         @JavascriptInterface
         fun onPlayback(position: Double, playing: Boolean) {
             runOnUiThread {
+                ytPlayCover.visibility = if (youtubeMode && !playing) View.VISIBLE else View.GONE
                 if (applyingRemote || !youtubeMode) return@runOnUiThread
                 if (!acceptLocalEvents && playing && position < 1.5) return@runOnUiThread
                 pushState(position, playing)
             }
+        }
+
+        @JavascriptInterface
+        fun onEnded() {
+            runOnUiThread { playNextFromQueue() }
         }
     }
 
