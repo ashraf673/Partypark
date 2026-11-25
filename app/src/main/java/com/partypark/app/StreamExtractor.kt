@@ -178,9 +178,11 @@ class StreamExtractor(private val host: FrameLayout) {
         return when (quality) {
             "144" -> withAudio(listOf(160, 133, 134), listOf(139, 249, 140, 250))
                 ?: single(progressive[18] ?: progressive.values.firstOrNull())
+                ?: (null to null)
             "high" -> single(progressive[22])
                 ?: withAudio(listOf(137, 136, 135), listOf(140, 141, 251))
                 ?: single(progressive.values.firstOrNull())
+                ?: (null to null)
             else -> {
                 val prog = listOf(18, 22, 37).firstNotNullOfOrNull { progressive[it] }
                 single(prog) ?: withAudio(VIDEO_ORDER, AUDIO_ORDER) ?: (null to null)

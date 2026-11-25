@@ -29,8 +29,8 @@ class PlaybackService : Service() {
             if (action == ACTION_TOGGLE) playing = !playing
             onAction?.invoke(action)
         }
-        val title = intent?.getStringExtra(EXTRA_TITLE)
-        if (!title.isNullOrBlank()) this.title = title
+        val incomingTitle = intent?.getStringExtra(EXTRA_TITLE)
+        if (!incomingTitle.isNullOrBlank()) trackTitle = incomingTitle
         if (intent?.hasExtra(EXTRA_PLAYING) == true) playing = intent.getBooleanExtra(EXTRA_PLAYING, true)
         startForeground(NOTIFICATION_ID, notification())
         return START_NOT_STICKY
@@ -64,7 +64,7 @@ class PlaybackService : Service() {
         val playIcon = if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
         val playLabel = if (playing) "Pause" else "Play"
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(title.ifBlank { "Partypark" })
+            .setContentTitle(trackTitle.ifBlank { "Partypark" })
             .setContentText(if (playing) "Playing" else "Paused")
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentIntent(open)
@@ -99,11 +99,11 @@ class PlaybackService : Service() {
         const val ACTION_TOGGLE = "com.partypark.app.TOGGLE"
 
         var onAction: ((String) -> Unit)? = null
-        private var title: String = "Partypark"
+        private var trackTitle: String = "Partypark"
         private var playing: Boolean = true
 
         fun start(context: Context, title: String, playing: Boolean) {
-            this.title = title
+            trackTitle = title
             this.playing = playing
             val intent = Intent(context, PlaybackService::class.java)
                 .putExtra(EXTRA_TITLE, title)
