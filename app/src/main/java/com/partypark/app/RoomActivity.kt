@@ -23,6 +23,8 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -56,7 +58,7 @@ class RoomActivity : AppCompatActivity() {
     private lateinit var roomsList: RecyclerView
     private lateinit var roomsEmpty: TextView
     private lateinit var messageInput: EditText
-    private lateinit var playerWebView: WebView
+    private lateinit var playerWebView: KeepAliveWebView
     private lateinit var playerPlaceholder: TextView
     private lateinit var playerContainer: FrameLayout
     private lateinit var seekHint: TextView
@@ -77,6 +79,8 @@ class RoomActivity : AppCompatActivity() {
     private var currentRoomCode: String? = null
     private var loadedUrl: String? = null
     private var usingExo = false
+    private var inBackground = false
+    private var backgroundPlay = false
     private var youtubeMode = false
     private var fullscreen = false
     private var controlsVisible = false
@@ -183,6 +187,33 @@ class RoomActivity : AppCompatActivity() {
         if (lobbyLayout.visibility == View.VISIBLE) refreshRooms()
     }
 
+    override fun onPause() {
+        backgroundPlay = mediaIsPlaying()
+        if (backgroundPlay) {
+            playerWebView.keepPlayingInBackground = true
+            playerWebView.onResume()
+            if (usingExo) {
+                exoPlayer?.setForegroundMode(true)
+                exoPlayer?.playWhenReady = true
+            }
+            PlaybackService.start(this)
+        }
+        super.onPause()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        inBackground = true
+    }
+
+    override fun onStart() {
+        inBackground = false
+        if (::playerWebView.isInitialized) playerWebView.keepPlayingInBackground = false
+        exoPlayer?.setForegroundMode(false)
+        PlaybackService.stop(this)
+        super.onStart()
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         applyOrientation()
@@ -241,9 +272,26 @@ class RoomActivity : AppCompatActivity() {
         exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .build()
+        exoPlayer?.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                .build(),
+            false
+        )
+        exoPlayer?.setWakeMode(C.WAKE_MODE_NETWORK)
         exoPlayer?.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (applyingRemote || !acceptLocalEvents || !usingExo) return
+                if (applyingRemote) {
+                    if (inBackground) syncBackgroundService(isPlaying)
+                    return
+                }
+                if (inBackground && backgroundPlay && usingExo && exoPlayer?.playWhenReady == false) {
+                    exoPlayer?.playWhenReady = true
+                    return
+                }
+                if (inBackground && backgroundPlay && !isPlaying) return
+                if (!acceptLocalEvents || !usingExo) return
                 val pos = (exoPlayer?.currentPosition ?: 0L) / 1000.0
                 if (isPlaying && pos < 1.0) return
                 pushState(pos, isPlaying)
@@ -266,6 +314,10 @@ class RoomActivity : AppCompatActivity() {
                     pendingYoutubeId = null
                     acceptLocalEvents = true
                     playerPlaceholder.visibility = View.GONE
+                }
+                if (playbackState == Player.STATE_ENDED && inBackground) {
+                    backgroundPlay = false
+                    PlaybackService.stop(this@RoomActivity)
                 }
             }
 
@@ -305,6 +357,28 @@ class RoomActivity : AppCompatActivity() {
             visibility = View.GONE
         }
         playerContainer.addView(playerView, 0)
+    }
+
+    private fun mediaIsPlaying(): Boolean {
+        if (!::roomLayout.isInitialized || roomLayout.visibility != View.VISIBLE) return false
+        if (loadedUrl.isNullOrBlank()) return false
+        return if (usingExo) {
+            exoPlayer?.playWhenReady == true && exoPlayer?.playbackState != Player.STATE_IDLE
+        } else {
+            playPauseBtn.text == "Pause"
+        }
+    }
+
+    private fun syncBackgroundService(playing: Boolean) {
+        if (!inBackground) return
+        if (playing) {
+            backgroundPlay = true
+            PlaybackService.start(this)
+        } else {
+            backgroundPlay = false
+            playerWebView.keepPlayingInBackground = false
+            PlaybackService.stop(this)
+        }
     }
 
     private fun showCreateDialog() {
@@ -980,6 +1054,9 @@ class RoomActivity : AppCompatActivity() {
         messages.clear()
         chatAdapter.notifyDataSetChanged()
         exoPlayer?.stop()
+        backgroundPlay = false
+        PlaybackService.stop(this)
+        playerWebView.keepPlayingInBackground = false
         playerWebView.loadUrl("about:blank")
         playerPlaceholder.visibility = View.VISIBLE
         playerPlaceholder.text = "No media loaded"
@@ -1125,6 +1202,8 @@ class RoomActivity : AppCompatActivity() {
         }
         if (::playerControls.isInitialized) playerControls.removeCallbacks(hideControls)
         if (::streamExtractor.isInitialized) streamExtractor.cancel()
+        backgroundPlay = false
+        PlaybackService.stop(this)
         stopListening()
         exoPlayer?.release()
         exoPlayer = null

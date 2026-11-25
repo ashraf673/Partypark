@@ -131,7 +131,7 @@
             android:layout_height="220dp"
             android:background="#000000">
 
-            <WebView
+            <com.partypark.app.KeepAliveWebView
                 android:id="@+id/player_webview"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent" />
