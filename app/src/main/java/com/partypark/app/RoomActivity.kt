@@ -1,6 +1,8 @@
 package com.partypark.app
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
@@ -46,6 +48,9 @@ import com.google.firebase.database.DatabaseError
 import com.google.firebase.database.ValueEventListener
 import com.google.firebase.database.ktx.database
 import com.google.firebase.ktx.Firebase
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 
 class RoomActivity : AppCompatActivity() {
@@ -56,6 +61,12 @@ class RoomActivity : AppCompatActivity() {
     private lateinit var lobbyLayout: LinearLayout
     private lateinit var roomLayout: LinearLayout
     private lateinit var roomCodeText: TextView
+    private lateinit var roomNameText: TextView
+    private lateinit var onlineCount: TextView
+    private lateinit var fsChat: LinearLayout
+    private lateinit var typingText: TextView
+    private lateinit var replyBar: LinearLayout
+    private lateinit var replyPreview: TextView
     private lateinit var chatList: RecyclerView
     private lateinit var roomsList: RecyclerView
     private lateinit var roomsEmpty: TextView
@@ -108,7 +119,16 @@ class RoomActivity : AppCompatActivity() {
     private var messageListener: ChildEventListener? = null
     private var queueListener: ValueEventListener? = null
     private var historyListener: ValueEventListener? = null
+    private var membersListener: ValueEventListener? = null
+    private var typingListener: ValueEventListener? = null
     private var listeningCode: String? = null
+    private var replyTo: ChatMessage? = null
+    private var overlayArmed = false
+    private var overlayHidden = true
+    private val overlayMessages = mutableListOf<ChatMessage>()
+    private val typingNames = mutableListOf<String>()
+    private val armOverlay = Runnable { overlayArmed = true }
+    private val typingIdle = Runnable { clearTyping() }
 
     private val messages = mutableListOf<ChatMessage>()
     private val roomItems = mutableListOf<RoomEntry>()
@@ -132,6 +152,11 @@ class RoomActivity : AppCompatActivity() {
 
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
                 if (loadedUrl == null) return false
+                if (fullscreen && fsChat.visibility == View.VISIBLE && e.x > gestureLayer.width * 0.45f) {
+                    overlayHidden = true
+                    fsChat.visibility = View.GONE
+                    return true
+                }
                 togglePlayerControls()
                 return true
             }
@@ -145,6 +170,12 @@ class RoomActivity : AppCompatActivity() {
         lobbyLayout = findViewById(R.id.lobby_layout)
         roomLayout = findViewById(R.id.room_layout)
         roomCodeText = findViewById(R.id.room_code_text)
+        roomNameText = findViewById(R.id.room_name_text)
+        onlineCount = findViewById(R.id.online_count)
+        fsChat = findViewById(R.id.fs_chat)
+        typingText = findViewById(R.id.typing_text)
+        replyBar = findViewById(R.id.reply_bar)
+        replyPreview = findViewById(R.id.reply_preview)
         chatList = findViewById(R.id.chat_list)
         roomsList = findViewById(R.id.rooms_list)
         roomsEmpty = findViewById(R.id.rooms_empty)
@@ -163,7 +194,7 @@ class RoomActivity : AppCompatActivity() {
         queueText = findViewById(R.id.queue_text)
         ytPlayCover = findViewById(R.id.yt_play_cover)
 
-        chatAdapter = ChatAdapter(messages)
+        chatAdapter = ChatAdapter(messages, { myDeviceId() }, { showMessageMenu(it) }, { showReactors(it) })
         chatList.layoutManager = LinearLayoutManager(this)
         chatList.adapter = chatAdapter
 
@@ -212,7 +243,16 @@ class RoomActivity : AppCompatActivity() {
                 refreshNotification()
             }
         }
+        findViewById<LinearLayout>(R.id.members_btn).setOnClickListener { showMembers() }
         findViewById<MaterialButton>(R.id.send_btn).setOnClickListener { sendMessage() }
+        findViewById<TextView>(R.id.reply_cancel).setOnClickListener { clearReply() }
+        messageInput.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                pulseTyping(s?.toString().orEmpty())
+            }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
 
         refreshRooms()
         playerContainer.postDelayed(heartbeat, 4000)
@@ -507,6 +547,7 @@ class RoomActivity : AppCompatActivity() {
             "members" to mapOf(myId to mapOf("name" to myName, "online" to true))
         )
         db.child("rooms").child(code).setValue(roomData).addOnSuccessListener {
+            postJoin(code, myName)
             enterRoom(code, name)
         }.addOnFailureListener {
             Toast.makeText(this, "Failed: ${it.message}", Toast.LENGTH_SHORT).show()
@@ -524,14 +565,21 @@ class RoomActivity : AppCompatActivity() {
             val name = snap.child("name").getValue(String::class.java) ?: "Room"
             val myName = prefs.getString("deviceName", "Guest") ?: "Guest"
             db.child("rooms").child(code).child("members").child(myDeviceId())
-                .setValue(mapOf("name" to myName, "online" to true))
-            enterRoom(code, name)
+                .get()
+                .addOnSuccessListener { member ->
+                    val wasOnline = member.child("online").getValue(Boolean::class.java) == true
+                    db.child("rooms").child(code).child("members").child(myDeviceId())
+                        .setValue(mapOf("name" to myName, "online" to true))
+                    if (!wasOnline) postJoin(code, myName)
+                    enterRoom(code, name)
+                }
         }
     }
 
     private fun enterRoom(code: String, name: String) {
         saveJoined(code, name)
         currentRoomCode = code
+        roomNameText.text = name
         roomCodeText.text = code
         lobbyLayout.visibility = View.GONE
         roomLayout.visibility = View.VISIBLE
@@ -540,6 +588,14 @@ class RoomActivity : AppCompatActivity() {
         loadedUrl = null
         lastAppliedTs = 0L
         hidePlayerControls()
+        overlayMessages.clear()
+        overlayHidden = true
+        overlayArmed = false
+        fsChat.removeAllViews()
+        fsChat.visibility = View.GONE
+        clearReply()
+        playerContainer.removeCallbacks(armOverlay)
+        playerContainer.postDelayed(armOverlay, 1200)
         listenToRoom(code)
         applyOrientation()
     }
@@ -550,14 +606,21 @@ class RoomActivity : AppCompatActivity() {
 
         messageListener = object : ChildEventListener {
             override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                val who = snapshot.child("name").getValue(String::class.java) ?: ""
-                val text = snapshot.child("text").getValue(String::class.java) ?: ""
-                messages.add(ChatMessage(who, text))
-                chatAdapter.notifyItemInserted(messages.size - 1)
-                chatList.scrollToPosition(messages.size - 1)
+                upsertMessage(messageFrom(snapshot))
             }
-            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {}
-            override fun onChildRemoved(snapshot: DataSnapshot) {}
+            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
+                upsertMessage(messageFrom(snapshot))
+            }
+            override fun onChildRemoved(snapshot: DataSnapshot) {
+                val key = snapshot.key ?: return
+                val index = messages.indexOfFirst { it.key == key }
+                if (index >= 0) {
+                    messages.removeAt(index)
+                    chatAdapter.notifyItemRemoved(index)
+                }
+                overlayMessages.removeAll { it.key == key }
+                renderOverlay()
+            }
             override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
             override fun onCancelled(error: DatabaseError) {}
         }
@@ -601,6 +664,39 @@ class RoomActivity : AppCompatActivity() {
             override fun onCancelled(error: DatabaseError) {}
         }
         db.child("rooms").child(code).child("history").addValueEventListener(historyListener!!)
+
+        membersListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val names = mutableListOf<String>()
+                for (child in snapshot.children) {
+                    if (child.child("online").getValue(Boolean::class.java) == true) {
+                        names.add(child.child("name").getValue(String::class.java) ?: "Guest")
+                    }
+                }
+                onlineCount.text = names.size.toString()
+                onlineCount.tag = names
+            }
+            override fun onCancelled(error: DatabaseError) {}
+        }
+        db.child("rooms").child(code).child("members").addValueEventListener(membersListener!!)
+
+        typingListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val now = System.currentTimeMillis()
+                typingNames.clear()
+                for (child in snapshot.children) {
+                    if (child.key == myDeviceId()) continue
+                    val at = child.child("at").getValue(Long::class.java)
+                        ?: child.child("at").getValue(Double::class.java)?.toLong()
+                        ?: 0L
+                    if (now - at > 4000) continue
+                    typingNames.add(child.child("name").getValue(String::class.java) ?: "Someone")
+                }
+                showTyping()
+            }
+            override fun onCancelled(error: DatabaseError) {}
+        }
+        db.child("rooms").child(code).child("typing").addValueEventListener(typingListener!!)
     }
 
     private fun onPlayerSnapshot(snapshot: DataSnapshot) {
@@ -745,10 +841,21 @@ class RoomActivity : AppCompatActivity() {
         val code = currentRoomCode ?: return
         if (text.isEmpty()) return
         val myName = prefs.getString("deviceName", "Guest") ?: "Guest"
-        db.child("rooms").child(code).child("messages").push().setValue(
-            mapOf("name" to myName, "text" to text, "ts" to System.currentTimeMillis())
+        val payload = hashMapOf<String, Any>(
+            "name" to myName,
+            "senderId" to myDeviceId(),
+            "text" to text,
+            "kind" to "chat",
+            "ts" to System.currentTimeMillis()
         )
+        replyTo?.let {
+            payload["replyName"] = it.name
+            payload["replyText"] = it.text
+        }
+        db.child("rooms").child(code).child("messages").push().setValue(payload)
         messageInput.text.clear()
+        clearReply()
+        clearTyping()
     }
 
     private fun showRoomMenu(anchor: View) {
@@ -1262,6 +1369,8 @@ class RoomActivity : AppCompatActivity() {
             queue.visibility = View.GONE
             chatList.visibility = View.GONE
             messageBar.visibility = View.GONE
+            findViewById<View>(R.id.typing_text).visibility = View.GONE
+            findViewById<View>(R.id.reply_bar).visibility = View.GONE
             playerLp.height = 0
             playerLp.weight = 1f
             hidePlayerControls()
@@ -1280,8 +1389,12 @@ class RoomActivity : AppCompatActivity() {
             queue.visibility = View.VISIBLE
             chatList.visibility = View.VISIBLE
             messageBar.visibility = View.VISIBLE
+            if (replyTo != null) replyBar.visibility = View.VISIBLE
+            showTyping()
             playerLp.height = dp(220)
             playerLp.weight = 0f
+            overlayHidden = true
+            fsChat.visibility = View.GONE
             window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
             window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         }
@@ -1428,6 +1541,8 @@ class RoomActivity : AppCompatActivity() {
     }
 
     private fun leaveRoom() {
+        val code = currentRoomCode
+        if (code != null) markOffline(code)
         holdChrome = false
         setWatchFullscreen(false)
         streamExtractor.cancel()
@@ -1464,10 +1579,14 @@ class RoomActivity : AppCompatActivity() {
         messageListener?.let { db.child("rooms").child(code).child("messages").removeEventListener(it) }
         queueListener?.let { db.child("rooms").child(code).child("queue").removeEventListener(it) }
         historyListener?.let { db.child("rooms").child(code).child("history").removeEventListener(it) }
+        membersListener?.let { db.child("rooms").child(code).child("members").removeEventListener(it) }
+        typingListener?.let { db.child("rooms").child(code).child("typing").removeEventListener(it) }
         playerListener = null
         messageListener = null
         queueListener = null
         historyListener = null
+        membersListener = null
+        typingListener = null
         listeningCode = null
     }
 
@@ -1581,8 +1700,11 @@ class RoomActivity : AppCompatActivity() {
         if (::playerContainer.isInitialized) {
             playerContainer.removeCallbacks(heartbeat)
             playerContainer.removeCallbacks(progressTick)
+            playerContainer.removeCallbacks(armOverlay)
         }
         if (::playerControls.isInitialized) playerControls.removeCallbacks(hideControls)
+        if (::messageInput.isInitialized) messageInput.removeCallbacks(typingIdle)
+        currentRoomCode?.let { markOffline(it) }
         if (::streamExtractor.isInitialized) streamExtractor.cancel()
         backgroundPlay = false
         PlaybackService.onAction = null
@@ -1612,29 +1734,342 @@ class RoomActivity : AppCompatActivity() {
         }
     }
 
+    private fun postJoin(code: String, name: String) {
+        db.child("rooms").child(code).child("messages").push().setValue(
+            mapOf(
+                "name" to name,
+                "senderId" to myDeviceId(),
+                "text" to "$name joined the room",
+                "kind" to "join",
+                "ts" to System.currentTimeMillis()
+            )
+        )
+    }
+
+    private fun markOffline(code: String) {
+        db.child("rooms").child(code).child("members").child(myDeviceId()).child("online").setValue(false)
+        db.child("rooms").child(code).child("typing").child(myDeviceId()).removeValue()
+    }
+
+    private fun pulseTyping(text: String) {
+        val code = currentRoomCode ?: return
+        messageInput.removeCallbacks(typingIdle)
+        if (text.isBlank()) {
+            clearTyping()
+            return
+        }
+        val myName = prefs.getString("deviceName", "Guest") ?: "Guest"
+        db.child("rooms").child(code).child("typing").child(myDeviceId()).setValue(
+            mapOf("name" to myName, "at" to System.currentTimeMillis())
+        )
+        messageInput.postDelayed(typingIdle, 2500)
+    }
+
+    private fun clearTyping() {
+        val code = currentRoomCode ?: return
+        db.child("rooms").child(code).child("typing").child(myDeviceId()).removeValue()
+    }
+
+    private fun showTyping() {
+        if (!::typingText.isInitialized) return
+        if (typingNames.isEmpty() || fullscreen) {
+            typingText.visibility = View.GONE
+        } else {
+            typingText.visibility = View.VISIBLE
+            typingText.text = when (typingNames.size) {
+                1 -> "${typingNames[0]} is typing"
+                2 -> "${typingNames[0]} and ${typingNames[1]} are typing"
+                else -> "${typingNames[0]} and ${typingNames.size - 1} others are typing"
+            }
+        }
+        if (fullscreen && fsChat.visibility == View.VISIBLE) renderOverlay()
+    }
+
+    private fun clearReply() {
+        replyTo = null
+        if (::replyBar.isInitialized) replyBar.visibility = View.GONE
+    }
+
+    private fun showMembers() {
+        @Suppress("UNCHECKED_CAST")
+        val names = (onlineCount.tag as? List<String>) ?: emptyList()
+        val body = if (names.isEmpty()) "Nobody is online" else names.joinToString("\n")
+        AlertDialog.Builder(this)
+            .setTitle("Online (${names.size})")
+            .setMessage(body)
+            .setPositiveButton("Close", null)
+            .show()
+    }
+
+    private fun messageFrom(snapshot: DataSnapshot): ChatMessage {
+        val reactions = linkedMapOf<String, Pair<String, String>>()
+        for (child in snapshot.child("reactions").children) {
+            val id = child.key ?: continue
+            val emoji = child.child("emoji").getValue(String::class.java)
+                ?: child.getValue(String::class.java)
+                ?: continue
+            val name = child.child("name").getValue(String::class.java) ?: "Someone"
+            reactions[id] = emoji to name
+        }
+        val ts = snapshot.child("ts").getValue(Long::class.java)
+            ?: snapshot.child("ts").getValue(Double::class.java)?.toLong()
+            ?: 0L
+        return ChatMessage(
+            key = snapshot.key ?: "",
+            name = snapshot.child("name").getValue(String::class.java) ?: "",
+            senderId = snapshot.child("senderId").getValue(String::class.java) ?: "",
+            text = snapshot.child("text").getValue(String::class.java) ?: "",
+            ts = ts,
+            kind = snapshot.child("kind").getValue(String::class.java) ?: "chat",
+            replyName = snapshot.child("replyName").getValue(String::class.java),
+            replyText = snapshot.child("replyText").getValue(String::class.java),
+            reactions = reactions
+        )
+    }
+
+    private fun upsertMessage(msg: ChatMessage) {
+        val index = messages.indexOfFirst { it.key == msg.key && msg.key.isNotEmpty() }
+        if (index >= 0) {
+            messages[index] = msg
+            chatAdapter.notifyItemChanged(index)
+            val overlayIndex = overlayMessages.indexOfFirst { it.key == msg.key }
+            if (overlayIndex >= 0) {
+                overlayMessages[overlayIndex] = msg
+                renderOverlay()
+            }
+            return
+        }
+        messages.add(msg)
+        chatAdapter.notifyItemInserted(messages.lastIndex)
+        chatList.scrollToPosition(messages.lastIndex)
+        if (overlayArmed && fullscreen && msg.kind == "chat") {
+            overlayHidden = false
+            overlayMessages.add(msg)
+            while (overlayMessages.size > 6) overlayMessages.removeAt(0)
+            renderOverlay()
+        }
+    }
+
+    private fun renderOverlay() {
+        if (!::fsChat.isInitialized) return
+        fsChat.removeAllViews()
+        if (!fullscreen || overlayHidden || overlayMessages.isEmpty()) {
+            fsChat.visibility = View.GONE
+            return
+        }
+        fsChat.visibility = View.VISIBLE
+        val mineId = myDeviceId()
+        val myName = prefs.getString("deviceName", "Guest") ?: "Guest"
+        for (msg in overlayMessages) {
+            val mine = msg.senderId == mineId || (msg.senderId.isEmpty() && msg.name == myName)
+            val column = LinearLayout(this)
+            column.orientation = LinearLayout.VERTICAL
+            column.layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(8) }
+            column.gravity = if (mine) android.view.Gravity.END else android.view.Gravity.START
+            if (!mine) {
+                val name = TextView(this)
+                name.text = msg.name
+                name.setTextColor(0xFFF0AB9D.toInt())
+                name.textSize = 12f
+                column.addView(name)
+            }
+            val bubble = TextView(this)
+            bubble.text = msg.text
+            bubble.setTextColor(android.graphics.Color.WHITE)
+            bubble.textSize = 15f
+            bubble.setPadding(dp(12), dp(8), dp(12), dp(8))
+            bubble.setBackgroundResource(if (mine) R.drawable.bg_bubble_mine else R.drawable.bg_bubble_other)
+            column.addView(bubble)
+            fsChat.addView(column)
+        }
+        if (typingNames.isNotEmpty()) {
+            val typing = TextView(this)
+            typing.text = "${typingNames.joinToString(", ")} is typing"
+            typing.setTextColor(0xFFC4B5FD.toInt())
+            typing.textSize = 12f
+            fsChat.addView(typing)
+        }
+    }
+
+    private fun showMessageMenu(msg: ChatMessage) {
+        if (msg.kind == "join" || fullscreen) return
+        val wrap = LinearLayout(this)
+        wrap.orientation = LinearLayout.VERTICAL
+        wrap.setPadding(dp(16), dp(12), dp(16), dp(4))
+        val time = TextView(this)
+        time.text = if (msg.ts > 0) SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(msg.ts)) else ""
+        time.gravity = android.view.Gravity.CENTER
+        time.setTextColor(android.graphics.Color.WHITE)
+        time.textSize = 14f
+        wrap.addView(time)
+        val reactions = LinearLayout(this)
+        reactions.orientation = LinearLayout.HORIZONTAL
+        reactions.gravity = android.view.Gravity.CENTER
+        val dialog = AlertDialog.Builder(this).setView(wrap).create()
+        fun addEmoji(emoji: String) {
+            val button = TextView(this)
+            button.text = emoji
+            button.textSize = 22f
+            button.setPadding(dp(10), dp(8), dp(10), dp(8))
+            button.setOnClickListener {
+                react(msg, emoji)
+                dialog.dismiss()
+            }
+            reactions.addView(button)
+        }
+        QUICK_REACTIONS.forEach { addEmoji(it) }
+        val more = ImageView(this)
+        more.setImageResource(R.drawable.ic_add)
+        more.setPadding(dp(8), dp(8), dp(8), dp(8))
+        more.setOnClickListener {
+            dialog.dismiss()
+            AlertDialog.Builder(this)
+                .setTitle("Reaction")
+                .setItems(MORE_REACTIONS.toTypedArray()) { _, which -> react(msg, MORE_REACTIONS[which]) }
+                .show()
+        }
+        reactions.addView(more)
+        wrap.addView(reactions)
+        val actions = LinearLayout(this)
+        actions.orientation = LinearLayout.HORIZONTAL
+        fun action(label: String, onClick: () -> Unit) {
+            val button = TextView(this)
+            button.text = label
+            button.setTextColor(android.graphics.Color.WHITE)
+            button.textSize = 14f
+            button.setPadding(dp(12), dp(12), dp(12), dp(12))
+            button.setOnClickListener {
+                dialog.dismiss()
+                onClick()
+            }
+            actions.addView(button)
+        }
+        action("Reply") {
+            replyTo = msg
+            replyPreview.text = "Reply to ${msg.name}: ${msg.text}"
+            replyBar.visibility = View.VISIBLE
+        }
+        action("Delete") {
+            val mine = msg.senderId == myDeviceId() || (msg.senderId.isEmpty() && msg.name == myName())
+            if (!mine) {
+                Toast.makeText(this, "You can only delete your own message", Toast.LENGTH_SHORT).show()
+            } else {
+                val code = currentRoomCode ?: return@action
+                db.child("rooms").child(code).child("messages").child(msg.key).removeValue()
+            }
+        }
+        action("Copy") {
+            val clipboard = getSystemService(ClipboardManager::class.java)
+            clipboard.setPrimaryClip(ClipData.newPlainText("message", msg.text))
+            Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
+        }
+        wrap.addView(actions)
+        dialog.show()
+    }
+
+    private fun react(msg: ChatMessage, emoji: String) {
+        val code = currentRoomCode ?: return
+        if (msg.key.isEmpty()) return
+        val ref = db.child("rooms").child(code).child("messages").child(msg.key)
+            .child("reactions").child(myDeviceId())
+        val current = msg.reactions[myDeviceId()]?.first
+        if (current == emoji) ref.removeValue()
+        else ref.setValue(mapOf("emoji" to emoji, "name" to myName()))
+    }
+
+    private fun showReactors(msg: ChatMessage) {
+        if (msg.reactions.isEmpty()) return
+        val lines = msg.reactions.values.map { "${it.first}  ${it.second}" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Reactions")
+            .setItems(lines, null)
+            .setPositiveButton("Close", null)
+            .show()
+    }
+
+    private fun myName(): String = prefs.getString("deviceName", "Guest") ?: "Guest"
+
     companion object {
         private const val APP_ORIGIN = "https://partypark.app"
+        private val QUICK_REACTIONS = listOf("\uD83D\uDC4D", "\u2764\uFE0F", "\uD83D\uDE02", "\uD83D\uDE22")
+        private val MORE_REACTIONS = listOf("\uD83D\uDD25", "\uD83D\uDC4F", "\uD83D\uDE2E", "\uD83C\uDF89", "\uD83D\uDE4F", "\uD83D\uDE0E", "\uD83E\uDD23", "\uD83D\uDE0D")
     }
 }
 
-data class ChatMessage(val name: String, val text: String)
+data class ChatMessage(
+    val key: String,
+    val name: String,
+    val senderId: String,
+    val text: String,
+    val ts: Long,
+    val kind: String,
+    val replyName: String?,
+    val replyText: String?,
+    val reactions: Map<String, Pair<String, String>>
+)
 
 data class RoomEntry(val code: String, val name: String)
 
-class ChatAdapter(private val items: List<ChatMessage>) : RecyclerView.Adapter<ChatAdapter.VH>() {
-    class VH(val view: TextView) : RecyclerView.ViewHolder(view)
-    override fun onCreateViewHolder(parent: android.view.ViewGroup, viewType: Int): VH {
-        val tv = TextView(parent.context).apply {
-            setPadding(16, 8, 16, 8)
-            setTextColor(android.graphics.Color.WHITE)
-            textSize = 14f
+class ChatAdapter(
+    private val items: List<ChatMessage>,
+    private val myId: () -> String,
+    private val onLongPress: (ChatMessage) -> Unit,
+    private val onReaction: (ChatMessage) -> Unit
+) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+
+    override fun getItemViewType(position: Int): Int {
+        val msg = items[position]
+        if (msg.kind == "join") return 2
+        return if (msg.senderId == myId() || (msg.senderId.isEmpty() && false)) 0 else 1
+    }
+
+    override fun onCreateViewHolder(parent: android.view.ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+        val inflater = android.view.LayoutInflater.from(parent.context)
+        val layout = when (viewType) {
+            0 -> R.layout.item_chat_mine
+            2 -> R.layout.item_chat_join
+            else -> R.layout.item_chat_other
         }
-        return VH(tv)
+        return object : RecyclerView.ViewHolder(inflater.inflate(layout, parent, false)) {}
     }
-    override fun onBindViewHolder(holder: VH, position: Int) {
-        val m = items[position]
-        holder.view.text = "${m.name}: ${m.text}"
+
+    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+        val msg = items[position]
+        val view = holder.itemView
+        val textView: TextView? = if (view is TextView) view else view.findViewById(R.id.chat_text)
+        textView?.text = msg.text
+        view.findViewById<TextView>(R.id.chat_name)?.text = msg.name
+        val reply = view.findViewById<TextView>(R.id.chat_reply)
+        if (reply != null) {
+            if (msg.replyText.isNullOrBlank()) {
+                reply.visibility = View.GONE
+            } else {
+                reply.visibility = View.VISIBLE
+                reply.text = "${msg.replyName}: ${msg.replyText}"
+            }
+        }
+        val reactions = view.findViewById<TextView>(R.id.chat_reactions)
+        if (reactions != null) {
+            if (msg.reactions.isEmpty()) {
+                reactions.visibility = View.GONE
+            } else {
+                reactions.visibility = View.VISIBLE
+                reactions.text = msg.reactions.values.groupBy { it.first }
+                    .entries.joinToString("  ") { "${it.key} ${it.value.size}" }
+                reactions.setOnClickListener { onReaction(msg) }
+            }
+        }
+        if (msg.kind != "join") {
+            view.setOnLongClickListener {
+                onLongPress(msg)
+                true
+            }
+        }
     }
+
     override fun getItemCount() = items.size
 }
 

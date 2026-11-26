@@ -81,7 +81,7 @@
         <LinearLayout
             android:id="@+id/room_header"
             android:layout_width="match_parent"
-            android:layout_height="56dp"
+            android:layout_height="64dp"
             android:background="#1e293b"
             android:gravity="center_vertical"
             android:paddingStart="12dp"
@@ -107,20 +107,54 @@
                 android:orientation="vertical">
 
                 <TextView
+                    android:id="@+id/room_name_text"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Room code"
-                    android:textColor="#94a3b8"
-                    android:textSize="11sp" />
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:text="Room"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
 
                 <TextView
                     android:id="@+id/room_code_text"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="------"
+                    android:textColor="#94a3b8"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/members_btn"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:gravity="center_vertical"
+                android:paddingStart="6dp"
+                android:paddingEnd="6dp">
+
+                <ImageView
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:contentDescription="Members"
+                    android:src="@drawable/ic_people" />
+
+                <TextView
+                    android:id="@+id/online_count"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:text="0"
                     android:textColor="#FFFFFF"
-                    android:textSize="18sp"
+                    android:textSize="14sp"
                     android:textStyle="bold" />
+
+                <View
+                    android:layout_width="8dp"
+                    android:layout_height="8dp"
+                    android:layout_marginStart="4dp"
+                    android:background="@drawable/bg_online_dot" />
             </LinearLayout>
 
             <ImageView
@@ -171,6 +205,17 @@
                 android:layout_height="96dp"
                 android:layout_gravity="center"
                 android:background="@drawable/bg_yt_cover"
+                android:visibility="gone" />
+
+            <LinearLayout
+                android:id="@+id/fs_chat"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:clickable="false"
+                android:focusable="false"
+                android:gravity="bottom"
+                android:orientation="vertical"
+                android:padding="12dp"
                 android:visibility="gone" />
 
             <View
@@ -303,6 +348,46 @@
             android:layout_height="0dp"
             android:layout_weight="1"
             android:padding="8dp" />
+
+        <TextView
+            android:id="@+id/typing_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingStart="12dp"
+            android:paddingTop="4dp"
+            android:paddingEnd="12dp"
+            android:textColor="#a78bfa"
+            android:textSize="13sp"
+            android:visibility="gone" />
+
+        <LinearLayout
+            android:id="@+id/reply_bar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#1e293b"
+            android:gravity="center_vertical"
+            android:paddingStart="12dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="8dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/reply_preview"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="#c4b5fd"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/reply_cancel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="8dp"
+                android:text="Close"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp" />
+        </LinearLayout>
 
         <LinearLayout
             android:id="@+id/message_bar"
