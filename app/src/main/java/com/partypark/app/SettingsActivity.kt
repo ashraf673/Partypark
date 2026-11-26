@@ -14,6 +14,9 @@ class SettingsActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.improve_connectivity_item).setOnClickListener {
             startActivity(Intent(this, ConnectivityActivity::class.java))
         }
+        findViewById<TextView>(R.id.profile_item).setOnClickListener {
+            startActivity(Intent(this, ProfileActivity::class.java))
+        }
 
         findViewById<TextView>(R.id.nav_home).setOnClickListener {
             finish()

@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.net.Uri
 import android.os.Bundle
@@ -123,6 +124,15 @@ class RoomActivity : AppCompatActivity() {
     private var typingListener: ValueEventListener? = null
     private var listeningCode: String? = null
     private var replyTo: ChatMessage? = null
+    private lateinit var playerSettings: ImageView
+    private var forcedFullscreen = false
+    private var lastSkipTs = 0L
+    private var creatorId = ""
+    private var everyoneAdmin = false
+    private val adminIds = mutableSetOf<String>()
+    private val onlineMembers = mutableListOf<OnlineMember>()
+    private var roomMetaListener: ValueEventListener? = null
+    private var kickedListener: ValueEventListener? = null
     private var overlayArmed = false
     private var overlayHidden = true
     private val overlayMessages = mutableListOf<ChatMessage>()
@@ -219,7 +229,9 @@ class RoomActivity : AppCompatActivity() {
         findViewById<ImageView>(R.id.room_menu_btn).setOnClickListener { showRoomMenu(it) }
         findViewById<MaterialButton>(R.id.load_btn).setOnClickListener { showMediaSources(replace = true) }
         findViewById<MaterialButton>(R.id.add_btn).setOnClickListener { showMediaSources(replace = false) }
-        findViewById<ImageView>(R.id.player_settings).setOnClickListener { showPlayerSettings() }
+        playerSettings = findViewById(R.id.player_settings)
+        playerSettings.setOnClickListener { showPlayerSettings() }
+        findViewById<ImageView>(R.id.fullscreen_btn).setOnClickListener { toggleManualFullscreen() }
         findViewById<ImageView>(R.id.prev_btn).setOnClickListener { playPrevious() }
         findViewById<ImageView>(R.id.next_btn).setOnClickListener { playNextFromQueue(fromUser = true) }
         bgToggle = findViewById(R.id.bg_toggle)
@@ -510,14 +522,22 @@ class RoomActivity : AppCompatActivity() {
     }
 
     private fun showCreateDialog() {
+        val wrap = LinearLayout(this)
+        wrap.orientation = LinearLayout.VERTICAL
+        wrap.setPadding(dp(20), dp(8), dp(20), 0)
         val input = EditText(this)
         input.hint = "Room name"
+        val toggle = androidx.appcompat.widget.SwitchCompat(this)
+        toggle.text = "Admin permission to everyone"
+        toggle.setPadding(0, dp(12), 0, 0)
+        wrap.addView(input)
+        wrap.addView(toggle)
         AlertDialog.Builder(this)
             .setTitle("Create Room")
-            .setView(input)
+            .setView(wrap)
             .setPositiveButton("Create") { _, _ ->
                 val name = input.text.toString().trim().ifEmpty { "Room" }
-                createRoom(name)
+                createRoom(name, toggle.isChecked)
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -537,14 +557,16 @@ class RoomActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun createRoom(name: String) {
+    private fun createRoom(name: String, everyone: Boolean) {
         val code = (1..6).map { "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".random() }.joinToString("")
-        val myName = prefs.getString("deviceName", "Guest") ?: "Guest"
+        val myName = myName()
         val myId = myDeviceId()
         val roomData = mapOf(
             "name" to name,
             "createdAt" to System.currentTimeMillis(),
-            "members" to mapOf(myId to mapOf("name" to myName, "online" to true))
+            "creatorId" to myId,
+            "everyoneAdmin" to everyone,
+            "members" to mapOf(myId to mapOf("name" to myName, "online" to true, "avatar" to Profile.avatar(this)))
         )
         db.child("rooms").child(code).setValue(roomData).addOnSuccessListener {
             postJoin(code, myName)
@@ -569,7 +591,7 @@ class RoomActivity : AppCompatActivity() {
                 .addOnSuccessListener { member ->
                     val wasOnline = member.child("online").getValue(Boolean::class.java) == true
                     db.child("rooms").child(code).child("members").child(myDeviceId())
-                        .setValue(mapOf("name" to myName, "online" to true))
+                        .setValue(mapOf("name" to myName, "online" to true, "avatar" to Profile.avatar(this)))
                     if (!wasOnline) postJoin(code, myName)
                     enterRoom(code, name)
                 }
@@ -667,18 +689,49 @@ class RoomActivity : AppCompatActivity() {
 
         membersListener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
-                val names = mutableListOf<String>()
+                onlineMembers.clear()
                 for (child in snapshot.children) {
-                    if (child.child("online").getValue(Boolean::class.java) == true) {
-                        names.add(child.child("name").getValue(String::class.java) ?: "Guest")
-                    }
+                    if (child.child("online").getValue(Boolean::class.java) != true) continue
+                    onlineMembers.add(
+                        OnlineMember(
+                            child.key ?: "",
+                            child.child("name").getValue(String::class.java) ?: "Guest",
+                            child.child("avatar").getValue(String::class.java) ?: ""
+                        )
+                    )
                 }
-                onlineCount.text = names.size.toString()
-                onlineCount.tag = names
+                onlineCount.text = onlineMembers.size.toString()
             }
             override fun onCancelled(error: DatabaseError) {}
         }
         db.child("rooms").child(code).child("members").addValueEventListener(membersListener!!)
+
+        roomMetaListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                creatorId = snapshot.child("creatorId").getValue(String::class.java) ?: creatorId
+                everyoneAdmin = snapshot.child("everyoneAdmin").getValue(Boolean::class.java) == true
+                adminIds.clear()
+                for (child in snapshot.child("admins").children) {
+                    if (child.getValue(Boolean::class.java) == true) child.key?.let { adminIds.add(it) }
+                }
+                val roomName = snapshot.child("name").getValue(String::class.java)
+                if (!roomName.isNullOrBlank()) roomNameText.text = roomName
+            }
+            override fun onCancelled(error: DatabaseError) {}
+        }
+        db.child("rooms").child(code).addValueEventListener(roomMetaListener!!)
+
+        kickedListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                if (snapshot.getValue(Boolean::class.java) == true) {
+                    Toast.makeText(this@RoomActivity, "You were removed from the room", Toast.LENGTH_SHORT).show()
+                    removeLocalRoom(code)
+                    leaveRoom()
+                }
+            }
+            override fun onCancelled(error: DatabaseError) {}
+        }
+        db.child("rooms").child(code).child("kicked").child(myDeviceId()).addValueEventListener(kickedListener!!)
 
         typingListener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
@@ -720,6 +773,11 @@ class RoomActivity : AppCompatActivity() {
         }
 
         if (by == myDeviceId()) return
+        val skip = snapshot.child("skip").getValue(String::class.java)
+        if (!skip.isNullOrBlank() && actionTs > lastSkipTs) {
+            lastSkipTs = actionTs
+            flash(skip)
+        }
         if (actionTs <= lastAppliedTs) return
         lastAppliedTs = actionTs
         val elapsed = if (playing) {
@@ -774,7 +832,7 @@ class RoomActivity : AppCompatActivity() {
         }
     }
 
-    private fun pushState(position: Double, playing: Boolean) {
+    private fun pushState(position: Double, playing: Boolean, skip: String? = null) {
         if (applyingRemote) return
         val code = currentRoomCode ?: return
         val url = loadedUrl ?: return
@@ -786,7 +844,8 @@ class RoomActivity : AppCompatActivity() {
             "position" to position,
             "playing" to playing,
             "actionTs" to ts,
-            "by" to myDeviceId()
+            "by" to myDeviceId(),
+            "skip" to (skip ?: "")
         ))
     }
 
@@ -809,8 +868,8 @@ class RoomActivity : AppCompatActivity() {
             "window.suppressUntil=Date.now()+1800;player.seekTo(t,true);return ''+t;})()"
         playerWebView.evaluateJavascript(js) { raw ->
             val t = raw?.trim()?.trim('"')?.toDoubleOrNull() ?: return@evaluateJavascript
-            pushState(t, true)
-            flash(if (deltaSec > 0) "+10s" else "-10s")
+            pushState(t, true, if (deltaSec > 0) "+10" else "-10")
+            flash(if (deltaSec > 0) "+10" else "-10")
         }
     }
 
@@ -821,11 +880,11 @@ class RoomActivity : AppCompatActivity() {
             val duration = (exoPlayer?.duration ?: 0L) / 1000.0
             var target = (now + deltaSec).coerceAtLeast(0.0)
             if (duration > 0) target = target.coerceAtMost(duration)
-            pushState(target, exoPlayer?.playWhenReady == true)
+            pushState(target, exoPlayer?.playWhenReady == true, if (deltaSec > 0) "+10" else "-10")
             applyingRemote = true
             exoPlayer?.seekTo((target * 1000).toLong())
             playerContainer.postDelayed({ applyingRemote = false }, 400)
-            flash(if (deltaSec > 0) "+10s" else "-10s")
+            flash(if (deltaSec > 0) "+10" else "-10")
         }
     }
 
@@ -844,6 +903,7 @@ class RoomActivity : AppCompatActivity() {
         val payload = hashMapOf<String, Any>(
             "name" to myName,
             "senderId" to myDeviceId(),
+            "avatar" to Profile.avatar(this),
             "text" to text,
             "kind" to "chat",
             "ts" to System.currentTimeMillis()
@@ -860,12 +920,14 @@ class RoomActivity : AppCompatActivity() {
 
     private fun showRoomMenu(anchor: View) {
         val popup = PopupMenu(this, anchor)
+        popup.menu.add("Settings")
         popup.menu.add("Full screen")
         popup.menu.add("Share")
         popup.menu.add("Leave")
         popup.setOnMenuItemClickListener { item ->
             when (item.title.toString()) {
-                "Full screen" -> showRotateHint()
+                "Settings" -> showRoomSettings()
+                "Full screen" -> toggleManualFullscreen()
                 "Share" -> shareRoom()
                 "Leave" -> leaveRoom()
             }
@@ -1349,8 +1411,23 @@ class RoomActivity : AppCompatActivity() {
     private fun applyOrientation() {
         val inRoom = roomLayout.visibility == View.VISIBLE
         val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-        if (!landscape) holdChrome = false
-        setWatchFullscreen(inRoom && landscape && !holdChrome)
+        if (!landscape && !forcedFullscreen) holdChrome = false
+        setWatchFullscreen(inRoom && !holdChrome && (landscape || forcedFullscreen))
+    }
+
+    private fun toggleManualFullscreen() {
+        if (currentRoomCode == null) return
+        if (fullscreen) {
+            forcedFullscreen = false
+            holdChrome = true
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            setWatchFullscreen(false)
+        } else {
+            forcedFullscreen = true
+            holdChrome = false
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            setWatchFullscreen(true)
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -1486,7 +1563,9 @@ class RoomActivity : AppCompatActivity() {
         if (loadedUrl == null) return
         controlsVisible = true
         playerControls.visibility = View.VISIBLE
+        playerSettings.visibility = View.VISIBLE
         playerControls.bringToFront()
+        playerSettings.bringToFront()
         refreshProgress()
         scheduleHideControls()
     }
@@ -1497,6 +1576,7 @@ class RoomActivity : AppCompatActivity() {
             playerControls.removeCallbacks(hideControls)
             playerControls.visibility = View.GONE
         }
+        if (::playerSettings.isInitialized) playerSettings.visibility = View.GONE
     }
 
     private fun scheduleHideControls() {
@@ -1581,12 +1661,18 @@ class RoomActivity : AppCompatActivity() {
         historyListener?.let { db.child("rooms").child(code).child("history").removeEventListener(it) }
         membersListener?.let { db.child("rooms").child(code).child("members").removeEventListener(it) }
         typingListener?.let { db.child("rooms").child(code).child("typing").removeEventListener(it) }
+        roomMetaListener?.let { db.child("rooms").child(code).removeEventListener(it) }
+        kickedListener?.let {
+            db.child("rooms").child(code).child("kicked").child(myDeviceId()).removeEventListener(it)
+        }
         playerListener = null
         messageListener = null
         queueListener = null
         historyListener = null
         membersListener = null
         typingListener = null
+        roomMetaListener = null
+        kickedListener = null
         listeningCode = null
     }
 
@@ -1791,13 +1877,110 @@ class RoomActivity : AppCompatActivity() {
     }
 
     private fun showMembers() {
-        @Suppress("UNCHECKED_CAST")
-        val names = (onlineCount.tag as? List<String>) ?: emptyList()
-        val body = if (names.isEmpty()) "Nobody is online" else names.joinToString("\n")
+        val wrap = LinearLayout(this)
+        wrap.orientation = LinearLayout.VERTICAL
+        wrap.setPadding(dp(16), dp(8), dp(16), dp(8))
+        if (onlineMembers.isEmpty()) {
+            val empty = TextView(this)
+            empty.text = "Nobody is online"
+            empty.setTextColor(android.graphics.Color.WHITE)
+            wrap.addView(empty)
+        }
+        for (member in onlineMembers) {
+            val row = LinearLayout(this)
+            row.orientation = LinearLayout.HORIZONTAL
+            row.gravity = android.view.Gravity.CENTER_VERTICAL
+            row.setPadding(0, dp(8), 0, dp(8))
+            val face = TextView(this)
+            face.text = member.avatar.ifBlank { "\uD83D\uDE0E" }
+            face.textSize = 20f
+            val label = TextView(this)
+            label.text = member.name
+            label.setTextColor(android.graphics.Color.WHITE)
+            label.textSize = 16f
+            label.setPadding(dp(10), 0, dp(8), 0)
+            label.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            row.addView(face)
+            row.addView(label)
+            if (canKick(member.id)) {
+                val kick = TextView(this)
+                kick.text = "Kick"
+                kick.setTextColor(0xFFF87171.toInt())
+                kick.textSize = 14f
+                kick.setOnClickListener { kickMember(member) }
+                row.addView(kick)
+            }
+            wrap.addView(row)
+        }
         AlertDialog.Builder(this)
-            .setTitle("Online (${names.size})")
-            .setMessage(body)
+            .setTitle("Online (${onlineMembers.size})")
+            .setView(wrap)
             .setPositiveButton("Close", null)
+            .show()
+    }
+
+    private fun canKick(targetId: String): Boolean {
+        if (targetId.isBlank() || targetId == myDeviceId() || targetId == creatorId) return false
+        if (everyoneAdmin) return true
+        if (myDeviceId() == creatorId) return true
+        return adminIds.contains(myDeviceId())
+    }
+
+    private fun kickMember(member: OnlineMember) {
+        val code = currentRoomCode ?: return
+        db.child("rooms").child(code).child("kicked").child(member.id).setValue(true)
+        db.child("rooms").child(code).child("members").child(member.id).removeValue()
+        db.child("rooms").child(code).child("admins").child(member.id).removeValue()
+        Toast.makeText(this, "${member.name} removed", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showRoomSettings() {
+        val options = mutableListOf("Rename")
+        if (myDeviceId() == creatorId) options.add("Promote as admin")
+        AlertDialog.Builder(this)
+            .setTitle("Settings")
+            .setItems(options.toTypedArray()) { _, which ->
+                if (options[which] == "Rename") renameRoom() else promoteAdmins()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun renameRoom() {
+        val code = currentRoomCode ?: return
+        val input = EditText(this)
+        input.setText(roomNameText.text)
+        AlertDialog.Builder(this)
+            .setTitle("Rename room")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val name = input.text.toString().trim().ifEmpty { "Room" }
+                db.child("rooms").child(code).child("name").setValue(name)
+                roomNameText.text = name
+                prefs.edit().putString("roomName_$code", name).apply()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun promoteAdmins() {
+        val code = currentRoomCode ?: return
+        if (onlineMembers.isEmpty()) {
+            Toast.makeText(this, "Nobody else is here", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = onlineMembers.map { it.name }.toTypedArray()
+        val checked = onlineMembers.map { adminIds.contains(it.id) }.toBooleanArray()
+        AlertDialog.Builder(this)
+            .setTitle("Promote as admin")
+            .setMultiChoiceItems(labels, checked) { _, which, on -> checked[which] = on }
+            .setPositiveButton("Save") { _, _ ->
+                onlineMembers.forEachIndexed { index, member ->
+                    val ref = db.child("rooms").child(code).child("admins").child(member.id)
+                    if (checked[index] && member.id != creatorId) ref.setValue(true) else ref.removeValue()
+                }
+            }
+            .setNegativeButton("Cancel", null)
             .show()
     }
 
@@ -1823,7 +2006,8 @@ class RoomActivity : AppCompatActivity() {
             kind = snapshot.child("kind").getValue(String::class.java) ?: "chat",
             replyName = snapshot.child("replyName").getValue(String::class.java),
             replyText = snapshot.child("replyText").getValue(String::class.java),
-            reactions = reactions
+            reactions = reactions,
+            avatar = snapshot.child("avatar").getValue(String::class.java) ?: ""
         )
     }
 
@@ -1865,22 +2049,24 @@ class RoomActivity : AppCompatActivity() {
             val column = LinearLayout(this)
             column.orientation = LinearLayout.VERTICAL
             column.layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(8) }
-            column.gravity = if (mine) android.view.Gravity.END else android.view.Gravity.START
+            column.gravity = android.view.Gravity.END
             if (!mine) {
-                val name = TextView(this)
-                name.text = msg.name
-                name.setTextColor(0xFFF0AB9D.toInt())
-                name.textSize = 12f
-                column.addView(name)
+                val who = TextView(this)
+                who.text = "${msg.avatar} ${msg.name}".trim()
+                who.setTextColor(0xFFF0AB9D.toInt())
+                who.textSize = 11f
+                who.gravity = android.view.Gravity.END
+                column.addView(who)
             }
             val bubble = TextView(this)
             bubble.text = msg.text
             bubble.setTextColor(android.graphics.Color.WHITE)
-            bubble.textSize = 15f
-            bubble.setPadding(dp(12), dp(8), dp(12), dp(8))
+            bubble.textSize = 14f
+            bubble.maxWidth = dp(200)
+            bubble.setPadding(dp(10), dp(6), dp(10), dp(6))
             bubble.setBackgroundResource(if (mine) R.drawable.bg_bubble_mine else R.drawable.bg_bubble_other)
             column.addView(bubble)
             fsChat.addView(column)
@@ -2008,8 +2194,11 @@ data class ChatMessage(
     val kind: String,
     val replyName: String?,
     val replyText: String?,
-    val reactions: Map<String, Pair<String, String>>
+    val reactions: Map<String, Pair<String, String>>,
+    val avatar: String
 )
+
+data class OnlineMember(val id: String, val name: String, val avatar: String)
 
 data class RoomEntry(val code: String, val name: String)
 
@@ -2042,6 +2231,7 @@ class ChatAdapter(
         val textView: TextView? = if (view is TextView) view else view.findViewById(R.id.chat_text)
         textView?.text = msg.text
         view.findViewById<TextView>(R.id.chat_name)?.text = msg.name
+        view.findViewById<TextView>(R.id.chat_avatar)?.text = msg.avatar
         val reply = view.findViewById<TextView>(R.id.chat_reply)
         if (reply != null) {
             if (msg.replyText.isNullOrBlank()) {

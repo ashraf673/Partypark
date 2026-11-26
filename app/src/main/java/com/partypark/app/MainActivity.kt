@@ -46,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        Profile.ensure(this)
         auth = Firebase.auth
         requestBasicPermissions()
 
@@ -154,14 +155,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showCreateDialog() {
+        val wrap = android.widget.LinearLayout(this)
+        wrap.orientation = android.widget.LinearLayout.VERTICAL
+        wrap.setPadding(48, 24, 48, 0)
         val input = EditText(this)
         input.hint = "Room name"
+        val toggle = androidx.appcompat.widget.SwitchCompat(this)
+        toggle.text = "Admin permission to everyone"
+        toggle.setPadding(0, 24, 0, 0)
+        wrap.addView(input)
+        wrap.addView(toggle)
         AlertDialog.Builder(this)
             .setTitle("Create Room")
-            .setView(input)
+            .setView(wrap)
             .setPositiveButton("Create") { _, _ ->
                 val name = input.text.toString().trim().ifEmpty { "Room" }
-                createRoom(name)
+                createRoom(name, toggle.isChecked)
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -181,14 +190,16 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun createRoom(name: String) {
+    private fun createRoom(name: String, everyone: Boolean) {
         val code = (1..6).map { "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".random() }.joinToString("")
         val myName = prefs.getString("deviceName", "Guest") ?: "Guest"
         val myId = deviceId()
         db.child("rooms").child(code).setValue(mapOf(
             "name" to name,
             "createdAt" to System.currentTimeMillis(),
-            "members" to mapOf(myId to mapOf("name" to myName, "online" to true))
+            "creatorId" to myId,
+            "everyoneAdmin" to everyone,
+            "members" to mapOf(myId to mapOf("name" to myName, "online" to true, "avatar" to Profile.avatar(this)))
         )).addOnSuccessListener {
             saveJoined(code, name)
             openRoom(code)
@@ -206,7 +217,11 @@ class MainActivity : AppCompatActivity() {
             val name = snap.child("name").getValue(String::class.java) ?: "Room"
             val myName = prefs.getString("deviceName", "Guest") ?: "Guest"
             db.child("rooms").child(code).child("members").child(deviceId())
-                .setValue(mapOf("name" to myName, "online" to true))
+                .setValue(mapOf(
+                    "name" to myName,
+                    "online" to true,
+                    "avatar" to Profile.avatar(this)
+                ))
             saveJoined(code, name)
             openRoom(code)
         }
