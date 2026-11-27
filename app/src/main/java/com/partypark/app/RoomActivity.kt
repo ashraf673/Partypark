@@ -405,29 +405,7 @@ class RoomActivity : AppCompatActivity() {
         exoPlayer?.setWakeMode(C.WAKE_MODE_NETWORK)
         exoPlayer?.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (suppressSync) return
-                if (applyingRemote) {
-                    if (inBackground) syncBackgroundService(isPlaying)
-                    return
-                }
-                if (inBackground && backgroundPlay && usingExo && exoPlayer?.playWhenReady == false && bgEnabled()) {
-                    return
-                }
-                if (!acceptLocalEvents || !usingExo) return
-                val pos = (exoPlayer?.currentPosition ?: 0L) / 1000.0
-                if (isPlaying && pos < 1.0) return
-                pushState(pos, isPlaying)
-                if (inBackground) refreshNotification()
-            }
-
-            override fun onPositionDiscontinuity(
-                oldPosition: Player.PositionInfo,
-                newPosition: Player.PositionInfo,
-                reason: Int
-            ) {
-                if (reason != Player.DISCONTINUITY_REASON_SEEK) return
-                if (applyingRemote || !acceptLocalEvents || !usingExo) return
-                pushState(newPosition.positionMs / 1000.0, exoPlayer?.playWhenReady == true)
+                if (inBackground) syncBackgroundService(isPlaying)
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -780,9 +758,10 @@ class RoomActivity : AppCompatActivity() {
         }
         if (actionTs <= lastAppliedTs) return
         lastAppliedTs = actionTs
-        val elapsed = if (playing) {
-            ((System.currentTimeMillis() - actionTs) / 1000.0).coerceAtLeast(0.0)
+        val rawElapsed = if (playing && actionTs > 0) {
+            (System.currentTimeMillis() - actionTs) / 1000.0
         } else 0.0
+        val elapsed = rawElapsed.coerceIn(0.0, 4.0)
         considerRemote(position + elapsed, playing)
     }
 
@@ -816,20 +795,8 @@ class RoomActivity : AppCompatActivity() {
     }
 
     private fun syncHeartbeat() {
-        if (!acceptLocalEvents || applyingRemote || currentRoomCode == null || loadedUrl == null) return
-        if (lastBy != myDeviceId()) return
-        if (usingExo && exoPlayer?.isPlaying == true) {
-            pushState((exoPlayer?.currentPosition ?: 0L) / 1000.0, true)
-            return
-        }
-        if (!youtubeMode) return
-        playerWebView.evaluateJavascript(
-            "(function(){if(!window.player||!player.getCurrentTime||!player.getPlayerState)return '';" +
-                "if(player.getPlayerState()!=1)return '';return ''+player.getCurrentTime();})()"
-        ) { raw ->
-            val t = raw?.trim()?.trim('"')?.toDoubleOrNull() ?: return@evaluateJavascript
-            if (lastBy == myDeviceId() && !applyingRemote) pushState(t, true)
-        }
+        // Do not push the playhead on a timer. Buffering and clock differences
+        // were being treated as seeks and jumped the movie for everyone.
     }
 
     private fun pushState(position: Double, playing: Boolean, skip: String? = null) {
@@ -1318,7 +1285,6 @@ class RoomActivity : AppCompatActivity() {
               <script>
                 var player;
                 window.suppressUntil = 0;
-                var lastT = 0;
                 function cover(show){var c=document.getElementById('cover'); if(c) c.style.display=show?'block':'none';}
                 function onYouTubeIframeAPIReady() {
                   player = new YT.Player('player', {
@@ -1350,21 +1316,8 @@ class RoomActivity : AppCompatActivity() {
                 function onPlayerStateChange(e) {
                   cover(e.data !== 1);
                   if (Date.now() < window.suppressUntil || !player || !player.getCurrentTime) return;
-                  var t = player.getCurrentTime();
-                  if (e.data === YT.PlayerState.PLAYING) Android.onPlayback(t, true);
-                  else if (e.data === YT.PlayerState.PAUSED) Android.onPlayback(t, false);
-                  else if (e.data === YT.PlayerState.ENDED) Android.onEnded();
+                  if (e.data === YT.PlayerState.ENDED) Android.onEnded();
                 }
-                setInterval(function() {
-                  if (Date.now() < window.suppressUntil || !player || !player.getCurrentTime) return;
-                  var st = player.getPlayerState();
-                  var t = player.getCurrentTime();
-                  var active = st === YT.PlayerState.PLAYING || st === YT.PlayerState.PAUSED;
-                  if (active && lastT > 0 && Math.abs(t - lastT) > 2.5) {
-                    Android.onPlayback(t, st === YT.PlayerState.PLAYING);
-                  }
-                  if (active) lastT = t;
-                }, 700);
               </script>
             </body>
             </html>
@@ -1806,11 +1759,8 @@ class RoomActivity : AppCompatActivity() {
         @JavascriptInterface
         fun onPlayback(position: Double, playing: Boolean) {
             runOnUiThread {
-                if (suppressSync) return@runOnUiThread
-                ytPlayCover.visibility = if (youtubeMode && !playing) View.VISIBLE else View.GONE
-                if (applyingRemote || !youtubeMode) return@runOnUiThread
-                if (!acceptLocalEvents && playing && position < 1.5) return@runOnUiThread
-                pushState(position, playing)
+                if (!youtubeMode) return@runOnUiThread
+                ytPlayCover.visibility = if (playing) View.GONE else View.VISIBLE
             }
         }
 
