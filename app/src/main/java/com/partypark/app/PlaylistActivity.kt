@@ -84,6 +84,25 @@ class PlaylistDetailActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         reload(findViewById<EditText>(R.id.playlist_search).text.toString())
+        refreshTitles()
+    }
+
+    private fun refreshTitles() {
+        val pending = PlaylistStore.load(this).find { it.id == playlistId }?.videos
+            ?.filter { VideoTitles.needsLookup(it.title, it.url) }
+            ?: return
+        pending.forEach { resolveTitle(it.url) }
+    }
+
+    private fun resolveTitle(url: String) {
+        Thread {
+            val title = VideoTitles.lookup(url) ?: return@Thread
+            if (isDestroyed) return@Thread
+            PlaylistStore.updateTitle(this, playlistId, url, title)
+            runOnUiThread {
+                if (!isDestroyed) reload(findViewById<EditText>(R.id.playlist_search).text.toString())
+            }
+        }.start()
     }
 
     private fun reload(query: String) {
@@ -124,9 +143,10 @@ class PlaylistDetailActivity : AppCompatActivity() {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val url = input.text.toString().trim()
                 if (url.isNotEmpty()) {
-                    PlaylistStore.addVideo(this, playlistId, url, url)
+                    PlaylistStore.addVideo(this, playlistId, url, "Loading title…")
                     reload(search.text.toString())
                     input.setText("")
+                    resolveTitle(url)
                 }
                 val q = search.text.toString()
                 if (q.isNotEmpty()) reload(q)

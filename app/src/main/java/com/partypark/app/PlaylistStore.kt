@@ -64,4 +64,14 @@ object PlaylistStore {
         playlist.videos.add(PlaylistVideo(url, title.ifBlank { url }))
         save(context, lists)
     }
+
+    fun updateTitle(context: Context, playlistId: String, url: String, title: String) {
+        if (title.isBlank()) return
+        val lists = load(context)
+        val playlist = lists.find { it.id == playlistId } ?: return
+        val index = playlist.videos.indexOfFirst { it.url == url }
+        if (index < 0) return
+        playlist.videos[index] = playlist.videos[index].copy(title = title)
+        save(context, lists)
+    }
 }

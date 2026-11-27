@@ -83,18 +83,36 @@ class YoutubePickActivity : AppCompatActivity() {
         }
         if (id == currentId && actions.visibility == android.view.View.VISIBLE) return
         currentId = id
-        web.evaluateJavascript("document.title") { raw ->
-            currentTitle = raw?.trim()?.trim('"')?.substringBefore(" - YouTube") ?: "YouTube video"
-            if (currentTitle.isBlank() || currentTitle == "null") currentTitle = "YouTube video"
-            titleView.text = currentTitle
-        }
+        currentTitle = ""
+        titleView.text = "Loading title…"
+        Thread {
+            val title = VideoTitles.lookup("https://www.youtube.com/watch?v=$id")
+            runOnUiThread {
+                if (currentId != id || isDestroyed) return@runOnUiThread
+                currentTitle = title?.takeIf { !VideoTitles.needsLookup(it, "") } ?: ""
+                titleView.text = currentTitle.ifBlank { "YouTube video" }
+            }
+        }.start()
         actions.visibility = android.view.View.VISIBLE
     }
 
     private fun addCurrent(top: Boolean) {
         val id = currentId ?: return
         val url = "https://www.youtube.com/watch?v=$id"
-        val title = currentTitle.ifBlank { "YouTube video" }
+        val known = currentTitle.takeIf { it.isNotBlank() && !VideoTitles.needsLookup(it, url) }
+        if (known != null) {
+            savePick(url, known, top)
+            return
+        }
+        Thread {
+            val title = VideoTitles.lookup(url) ?: "YouTube video"
+            runOnUiThread {
+                if (!isDestroyed) savePick(url, title, top)
+            }
+        }.start()
+    }
+
+    private fun savePick(url: String, title: String, top: Boolean) {
         if (mode == MODE_PLAYLIST) {
             if (playlistId.isBlank()) return
             PlaylistStore.addVideo(this, playlistId, url, title)
