@@ -85,15 +85,39 @@ class YoutubePickActivity : AppCompatActivity() {
         currentId = id
         currentTitle = ""
         titleView.text = "Loading title…"
-        Thread {
-            val title = VideoTitles.lookup("https://www.youtube.com/watch?v=$id")
-            runOnUiThread {
-                if (currentId != id || isDestroyed) return@runOnUiThread
-                currentTitle = title?.takeIf { !VideoTitles.needsLookup(it, "") } ?: ""
-                titleView.text = currentTitle.ifBlank { "YouTube video" }
-            }
-        }.start()
+        readTitle(id, 0)
         actions.visibility = android.view.View.VISIBLE
+    }
+
+    private fun readTitle(id: String, attempt: Int) {
+        web.evaluateJavascript(TITLE_JS) { raw ->
+            if (currentId != id || isDestroyed) return@evaluateJavascript
+            val parsed = raw?.trim()?.trim('"')
+                ?.replace("\\u0026", "&")
+                ?.replace("\\\"", "\"")
+                ?: ""
+            val clean = parsed.substringBefore(" - YouTube").trim()
+            if (clean.isNotBlank() && !clean.equals("null", true) && !clean.equals("YouTube", true)) {
+                currentTitle = clean
+                titleView.text = clean
+                return@evaluateJavascript
+            }
+            if (attempt < 12) {
+                web.postDelayed({ readTitle(id, attempt + 1) }, 500)
+            }
+        }
+        if (attempt == 0) {
+            Thread {
+                val title = VideoTitles.lookup("https://www.youtube.com/watch?v=$id")
+                runOnUiThread {
+                    if (currentId != id || isDestroyed || currentTitle.isNotBlank()) return@runOnUiThread
+                    if (!title.isNullOrBlank()) {
+                        currentTitle = title
+                        titleView.text = title
+                    }
+                }
+            }.start()
+        }
     }
 
     private fun addCurrent(top: Boolean) {
@@ -156,6 +180,28 @@ class YoutubePickActivity : AppCompatActivity() {
         const val EXTRA_PLAYLIST_ID = "playlist_id"
         const val MODE_PLAYLIST = "playlist"
         const val MODE_ROOM = "room"
+        private val TITLE_JS = """
+            (function(){
+              var preferred = [
+                'h2.slim-video-information-title',
+                '.slim-video-information-title',
+                'ytm-video-description-header-renderer h2',
+                '.watch-title',
+                'meta[property="og:title"]',
+                'meta[name="title"]'
+              ];
+              function text(el){ return (el.content || el.innerText || el.textContent || '').replace(/\\s+/g,' ').trim(); }
+              for (var i = 0; i < preferred.length; i++) {
+                var el = document.querySelector(preferred[i]);
+                if (!el) continue;
+                var t = text(el);
+                if (t && t !== 'YouTube' && t.length > 1) return t;
+              }
+              var title = (document.title || '').replace(/ - YouTube$/, '').trim();
+              if (title && title !== 'YouTube') return title;
+              return '';
+            })()
+        """.trimIndent()
         private val WATCH_JS = """
             (function(){
               if (window.__ppWatch) return;

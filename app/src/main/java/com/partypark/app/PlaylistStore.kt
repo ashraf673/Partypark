@@ -60,8 +60,17 @@ object PlaylistStore {
     fun addVideo(context: Context, playlistId: String, url: String, title: String) {
         val lists = load(context)
         val playlist = lists.find { it.id == playlistId } ?: return
-        if (playlist.videos.any { it.url == url }) return
-        playlist.videos.add(PlaylistVideo(url, title.ifBlank { url }))
+        val existing = playlist.videos.indexOfFirst { it.url == url }
+        val clean = title.ifBlank { url }
+        if (existing >= 0) {
+            val current = playlist.videos[existing].title
+            if (VideoTitles.needsLookup(current, url) && !VideoTitles.needsLookup(clean, url)) {
+                playlist.videos[existing] = playlist.videos[existing].copy(title = clean)
+                save(context, lists)
+            }
+            return
+        }
+        playlist.videos.add(PlaylistVideo(url, clean))
         save(context, lists)
     }
 
