@@ -207,6 +207,15 @@
                 android:background="@drawable/bg_yt_cover"
                 android:visibility="gone" />
 
+            <ProgressBar
+                android:id="@+id/buffer_spinner"
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:layout_gravity="center"
+                android:indeterminate="true"
+                android:indeterminateTint="#FFFFFF"
+                android:visibility="gone" />
+
             <LinearLayout
                 android:id="@+id/fs_chat"
                 android:layout_width="220dp"
@@ -301,6 +310,18 @@
                     android:padding="10dp"
                     android:src="@drawable/ic_fullscreen" />
             </LinearLayout>
+
+            <ImageView
+                android:id="@+id/buffer_caution"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:layout_gravity="top|start"
+                android:layout_margin="10dp"
+                android:alpha="0.72"
+                android:contentDescription="Slow connection"
+                android:padding="4dp"
+                android:src="@drawable/ic_caution"
+                android:visibility="gone" />
 
             <ImageView
                 android:id="@+id/player_settings"

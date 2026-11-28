@@ -22,6 +22,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -101,6 +102,15 @@ class RoomActivity : AppCompatActivity() {
     private var backgroundPlay = false
     private var suppressSync = false
     private var pausedForReturn = false
+    private var userPaused = false
+    private var localBuffering = false
+    private var reportedBuffer = false
+    private var sawPlayback = false
+    private var clockPosition = 0.0
+    private var clockAt = 0L
+    private val slowNames = mutableListOf<String>()
+    private lateinit var bufferSpinner: ProgressBar
+    private lateinit var bufferCaution: ImageView
     private lateinit var bgToggle: TextView
     private lateinit var queueText: TextView
     private lateinit var ytPlayCover: View
@@ -133,6 +143,8 @@ class RoomActivity : AppCompatActivity() {
     private val onlineMembers = mutableListOf<OnlineMember>()
     private var roomMetaListener: ValueEventListener? = null
     private var kickedListener: ValueEventListener? = null
+    private var clockListener: ValueEventListener? = null
+    private var bufferListener: ValueEventListener? = null
     private var overlayArmed = false
     private var overlayHidden = true
     private val overlayMessages = mutableListOf<ChatMessage>()
@@ -231,6 +243,9 @@ class RoomActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.add_btn).setOnClickListener { showMediaSources(replace = false) }
         playerSettings = findViewById(R.id.player_settings)
         playerSettings.setOnClickListener { showPlayerSettings() }
+        bufferSpinner = findViewById(R.id.buffer_spinner)
+        bufferCaution = findViewById(R.id.buffer_caution)
+        bufferCaution.setOnClickListener { showSlowMembers() }
         findViewById<ImageView>(R.id.fullscreen_btn).setOnClickListener { toggleManualFullscreen() }
         findViewById<ImageView>(R.id.prev_btn).setOnClickListener { playPrevious() }
         findViewById<ImageView>(R.id.next_btn).setOnClickListener { playNextFromQueue(fromUser = true) }
@@ -294,18 +309,18 @@ class RoomActivity : AppCompatActivity() {
                 exoPlayer?.playWhenReady = true
             }
             PlaybackService.start(this, displayTitle(), true)
+        } else if (wasPlaying && !userPaused) {
+            backgroundPlay = false
+            pausedForReturn = true
+            suppressSync = true
+            if (usingExo) exoPlayer?.playWhenReady = false
+            else playerWebView.evaluateJavascript(
+                "if(window.player&&player.pauseVideo){window.suppressUntil=Date.now()+4000;player.pauseVideo();}",
+                null
+            )
+            playerContainer.postDelayed({ suppressSync = false }, 1500)
         } else {
             backgroundPlay = false
-            if (wasPlaying) {
-                pausedForReturn = true
-                suppressSync = true
-                if (usingExo) exoPlayer?.playWhenReady = false
-                else playerWebView.evaluateJavascript(
-                    "if(window.player&&player.pauseVideo){window.suppressUntil=Date.now()+4000;player.pauseVideo();}",
-                    null
-                )
-                playerContainer.postDelayed({ suppressSync = false }, 1500)
-            }
             PlaybackService.stop(this)
         }
         super.onPause()
@@ -321,7 +336,7 @@ class RoomActivity : AppCompatActivity() {
         inBackground = false
         if (::playerWebView.isInitialized) playerWebView.keepPlayingInBackground = false
         exoPlayer?.setForegroundMode(false)
-        if (pausedForReturn) {
+        if (pausedForReturn && !userPaused) {
             pausedForReturn = false
             suppressSync = true
             if (usingExo) exoPlayer?.playWhenReady = true
@@ -330,8 +345,13 @@ class RoomActivity : AppCompatActivity() {
                 null
             )
             if (::playerContainer.isInitialized) {
-                playerContainer.postDelayed({ suppressSync = false }, 1500)
+                playerContainer.postDelayed({
+                    suppressSync = false
+                    catchUpToRoom()
+                }, 600)
             }
+        } else {
+            pausedForReturn = false
         }
         PlaybackService.stop(this)
         super.onStart()
@@ -409,6 +429,12 @@ class RoomActivity : AppCompatActivity() {
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_BUFFERING) {
+                    setLocalBuffering(true)
+                } else if (playbackState == Player.STATE_READY || playbackState == Player.STATE_ENDED) {
+                    if (playbackState == Player.STATE_READY && exoPlayer?.isPlaying == true) sawPlayback = true
+                    setLocalBuffering(false)
+                }
                 if (playbackState == Player.STATE_READY) {
                     driveFallbackId = null
                     driveRetried = false
@@ -711,6 +737,32 @@ class RoomActivity : AppCompatActivity() {
         }
         db.child("rooms").child(code).child("kicked").child(myDeviceId()).addValueEventListener(kickedListener!!)
 
+        clockListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                clockPosition = numberOf(snapshot, "position")
+                clockAt = longOf(snapshot, "at")
+            }
+            override fun onCancelled(error: DatabaseError) {}
+        }
+        db.child("rooms").child(code).child("clock").addValueEventListener(clockListener!!)
+
+        bufferListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val now = System.currentTimeMillis()
+                slowNames.clear()
+                for (child in snapshot.children) {
+                    val at = child.child("at").getValue(Long::class.java)
+                        ?: child.child("at").getValue(Double::class.java)?.toLong()
+                        ?: 0L
+                    if (now - at > 20000) continue
+                    slowNames.add(child.child("name").getValue(String::class.java) ?: "Someone")
+                }
+                refreshCaution()
+            }
+            override fun onCancelled(error: DatabaseError) {}
+        }
+        db.child("rooms").child(code).child("buffering").addValueEventListener(bufferListener!!)
+
         typingListener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 val now = System.currentTimeMillis()
@@ -795,8 +847,30 @@ class RoomActivity : AppCompatActivity() {
     }
 
     private fun syncHeartbeat() {
-        // Do not push the playhead on a timer. Buffering and clock differences
-        // were being treated as seeks and jumped the movie for everyone.
+        val code = currentRoomCode ?: return
+        if (loadedUrl == null || localBuffering || !sawPlayback) return
+        val playing = if (usingExo) exoPlayer?.isPlaying == true else playPauseBtn.text == "Pause"
+        if (!playing) return
+        if (usingExo) {
+            publishClock((exoPlayer?.currentPosition ?: 0L) / 1000.0)
+            return
+        }
+        if (!youtubeMode) return
+        playerWebView.evaluateJavascript(
+            "(function(){if(!window.player||!player.getCurrentTime||!player.getPlayerState)return '';" +
+                "if(player.getPlayerState()!=1)return '';return ''+player.getCurrentTime();})()"
+        ) { raw ->
+            val t = raw?.trim()?.trim('"')?.toDoubleOrNull() ?: return@evaluateJavascript
+            publishClock(t)
+        }
+    }
+
+    private fun publishClock(position: Double) {
+        val code = currentRoomCode ?: return
+        val at = System.currentTimeMillis()
+        clockPosition = position
+        clockAt = at
+        db.child("rooms").child(code).child("clock").setValue(mapOf("position" to position, "at" to at))
     }
 
     private fun pushState(position: Double, playing: Boolean, skip: String? = null) {
@@ -1316,8 +1390,14 @@ class RoomActivity : AppCompatActivity() {
                 function onPlayerStateChange(e) {
                   cover(e.data !== 1);
                   if (Date.now() < window.suppressUntil || !player || !player.getCurrentTime) return;
+                  if (e.data === YT.PlayerState.PLAYING) Android.onBuffer(false);
+                  else if (e.data === YT.PlayerState.BUFFERING) Android.onBuffer(true);
                   if (e.data === YT.PlayerState.ENDED) Android.onEnded();
                 }
+                setInterval(function() {
+                  if (!player || !player.getPlayerState) return;
+                  Android.onBuffer(player.getPlayerState() === YT.PlayerState.BUFFERING);
+                }, 1000);
               </script>
             </body>
             </html>
@@ -1517,8 +1597,10 @@ class RoomActivity : AppCompatActivity() {
         controlsVisible = true
         playerControls.visibility = View.VISIBLE
         playerSettings.visibility = View.VISIBLE
+        refreshCaution()
         playerControls.bringToFront()
         playerSettings.bringToFront()
+        bufferCaution.bringToFront()
         refreshProgress()
         scheduleHideControls()
     }
@@ -1530,6 +1612,7 @@ class RoomActivity : AppCompatActivity() {
             playerControls.visibility = View.GONE
         }
         if (::playerSettings.isInitialized) playerSettings.visibility = View.GONE
+        refreshCaution()
     }
 
     private fun scheduleHideControls() {
@@ -1543,10 +1626,15 @@ class RoomActivity : AppCompatActivity() {
         if (usingExo) {
             val playingNow = exoPlayer?.isPlaying == true
             val pos = (exoPlayer?.currentPosition ?: 0L) / 1000.0
+            userPaused = playingNow
             exoPlayer?.playWhenReady = !playingNow
+            if (!playingNow) sawPlayback = true
             pushState(pos, !playingNow)
             playPauseBtn.text = if (playingNow) "Play" else "Pause"
         } else if (youtubeMode) {
+            val willPause = playPauseBtn.text == "Pause"
+            userPaused = willPause
+            if (!willPause) sawPlayback = true
             playerWebView.evaluateJavascript(
                 "(function(){if(!window.player||!player.getPlayerState)return '';" +
                     "var st=player.getPlayerState();var t=player.getCurrentTime();" +
@@ -1556,6 +1644,8 @@ class RoomActivity : AppCompatActivity() {
                 val parts = raw?.trim()?.trim('"')?.split(',') ?: return@evaluateJavascript
                 val t = parts.getOrNull(0)?.toDoubleOrNull() ?: return@evaluateJavascript
                 val playing = parts.getOrNull(1) == "1"
+                userPaused = !playing
+                if (playing) sawPlayback = true
                 pushState(t, playing)
                 playPauseBtn.text = if (playing) "Pause" else "Play"
             }
@@ -1618,6 +1708,9 @@ class RoomActivity : AppCompatActivity() {
         kickedListener?.let {
             db.child("rooms").child(code).child("kicked").child(myDeviceId()).removeEventListener(it)
         }
+        clockListener?.let { db.child("rooms").child(code).child("clock").removeEventListener(it) }
+        bufferListener?.let { db.child("rooms").child(code).child("buffering").removeEventListener(it) }
+        clearBufferReport()
         playerListener = null
         messageListener = null
         queueListener = null
@@ -1626,7 +1719,74 @@ class RoomActivity : AppCompatActivity() {
         typingListener = null
         roomMetaListener = null
         kickedListener = null
+        clockListener = null
+        bufferListener = null
         listeningCode = null
+    }
+
+    private fun setLocalBuffering(on: Boolean) {
+        if (!::bufferSpinner.isInitialized) return
+        if (on == localBuffering) return
+        localBuffering = on
+        bufferSpinner.visibility = if (on) View.VISIBLE else View.GONE
+        if (on) bufferSpinner.bringToFront()
+        val code = currentRoomCode
+        if (!sawPlayback || code == null) return
+        if (on) {
+            reportedBuffer = true
+            db.child("rooms").child(code).child("buffering").child(myDeviceId())
+                .setValue(mapOf("name" to myName(), "at" to System.currentTimeMillis()))
+        } else if (reportedBuffer) {
+            reportedBuffer = false
+            clearBufferReport()
+            catchUpToRoom()
+        }
+    }
+
+    private fun clearBufferReport() {
+        val code = currentRoomCode ?: return
+        db.child("rooms").child(code).child("buffering").child(myDeviceId()).removeValue()
+    }
+
+    private fun catchUpToRoom() {
+        if (clockAt <= 0L || loadedUrl == null || userPaused) return
+        val elapsed = ((System.currentTimeMillis() - clockAt) / 1000.0).coerceIn(0.0, 8.0)
+        val target = clockPosition + elapsed
+        if (usingExo) {
+            val local = (exoPlayer?.currentPosition ?: 0L) / 1000.0
+            if (target > local + 3) {
+                applyingRemote = true
+                exoPlayer?.seekTo((target * 1000).toLong())
+                exoPlayer?.playWhenReady = true
+                playerContainer.postDelayed({ applyingRemote = false }, 1200)
+            }
+            return
+        }
+        if (!youtubeMode) return
+        playerWebView.evaluateJavascript(
+            "(function(){if(!window.player||!player.getCurrentTime)return '';return ''+player.getCurrentTime();})()"
+        ) { raw ->
+            val now = raw?.trim()?.trim('"')?.toDoubleOrNull() ?: return@evaluateJavascript
+            if (target <= now + 3) return@evaluateJavascript
+            applyingRemote = true
+            val js = "if(window.player&&player.seekTo){window.suppressUntil=Date.now()+1800;player.seekTo($target,true);player.playVideo();}"
+            playerWebView.evaluateJavascript(js, null)
+            playerContainer.postDelayed({ applyingRemote = false }, 1200)
+        }
+    }
+
+    private fun refreshCaution() {
+        if (!::bufferCaution.isInitialized) return
+        bufferCaution.visibility = if (controlsVisible && slowNames.isNotEmpty()) View.VISIBLE else View.GONE
+    }
+
+    private fun showSlowMembers() {
+        val body = if (slowNames.isEmpty()) "The connection is fine now" else slowNames.joinToString("\n")
+        AlertDialog.Builder(this)
+            .setTitle("Slow connection")
+            .setMessage(body)
+            .setPositiveButton("Close", null)
+            .show()
     }
 
     private fun refreshRooms() {
@@ -1761,6 +1921,15 @@ class RoomActivity : AppCompatActivity() {
             runOnUiThread {
                 if (!youtubeMode) return@runOnUiThread
                 ytPlayCover.visibility = if (playing) View.GONE else View.VISIBLE
+            }
+        }
+
+        @JavascriptInterface
+        fun onBuffer(buffering: Boolean) {
+            runOnUiThread {
+                if (!youtubeMode) return@runOnUiThread
+                if (!buffering) sawPlayback = true
+                setLocalBuffering(buffering)
             }
         }
 
